@@ -1,0 +1,9 @@
+{
+    "params": 7030417,
+    "flops": 15971532800,
+    "dataset": "detrac",
+    "epochs": 0,
+    "lr": 0.0001,
+    "batch_size": 4,
+    "best_map": 0.0
+}
