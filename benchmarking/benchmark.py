@@ -21,6 +21,14 @@ class TrafficBenchmark(BaseBenchmark):
 
     def evaluate_checkpoint(self, model: nn.Module, loader: DataLoader) -> Dict[str, Any]:
         """Loads and completely evaluates a model, computing structural, speed, and accuracy metrics."""
+        # Check if the model has dynamic pruning hooks and bake them to get accurate speed/size metrics
+        has_masks = any(hasattr(module, 'weight_orig') for module in model.modules())
+        if has_masks:
+            logger.info("Baking pruning masks into weights to eliminate forward hook overhead during benchmarking...")
+            from utils.pipeline_utils import bake_pruned_weights
+            num_baked = bake_pruned_weights(model)
+            logger.info(f"Successfully baked weights and removed dynamic hooks for {num_baked} modules.")
+
         self.validator = Validator(model, self.device)
         
         logger.info(f"Evaluating model structure...")
@@ -30,8 +38,17 @@ class TrafficBenchmark(BaseBenchmark):
         speed_metrics = self.profile_speed(model)
         
         logger.info(f"Evaluating accuracy metrics (mAP, Precision, Recall)...")
-        preds, gts = self.validator.gather_predictions(loader)
-        accuracy_metrics = self.validator.calculate_accuracy_metrics(preds, gts)
+        try:
+            preds, gts = self.validator.gather_predictions(loader)
+            accuracy_metrics = self.validator.calculate_accuracy_metrics(preds, gts)
+        except Exception as e:
+            logger.error(f"Failed to evaluate accuracy metrics: {e}", exc_info=True)
+            accuracy_metrics = {
+                "precision": 0.0,
+                "recall": 0.0,
+                "mAP50": 0.0,
+                "mAP50-95": 0.0
+            }
         
         results = {
             "Model": self.model_name.upper(),
@@ -56,6 +73,10 @@ class TrafficBenchmark(BaseBenchmark):
     @staticmethod
     def export_results(results: List[Dict[str, Any]], csv_path: str = "reports/benchmark.csv", json_path: str = "reports/benchmark.json"):
         """Exports a list of evaluation results to CSV, JSON, and Markdown format."""
+        if not results:
+            logger.warning("Results list is empty. Skipping file export.")
+            return
+
         os.makedirs(os.path.dirname(csv_path), exist_ok=True)
         os.makedirs(os.path.dirname(json_path), exist_ok=True)
         

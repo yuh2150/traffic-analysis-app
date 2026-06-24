@@ -26,6 +26,7 @@ class BaseTrainer:
         val_loader: Optional[DataLoader] = None,
         patience: int = 10,
         use_amp: bool = True,
+        config: Optional[Dict[str, Any]] = None,
     ):
         self.model = model
         self.train_loader = train_loader
@@ -40,8 +41,9 @@ class BaseTrainer:
         
         self.best_loss = float("inf")
         self.best_map = 0.0
+        self.config = config
         self.artifact_manager = ArtifactManager()
-        self.scaler = torch.amp.GradScaler("cuda", enabled=use_amp and device.type == "cuda")
+        self.scaler = torch.amp.GradScaler("cuda", enabled=use_amp and self.device.type == "cuda")
 
         # Check if the model contains pruning masks
         self.is_pruned = any(hasattr(m, "pruning_mask") for m in model.modules())
@@ -156,7 +158,7 @@ class BaseTrainer:
                 if val_map50 > self.best_map:
                     self.best_map = val_map50
                     self.save_checkpoint(epoch, avg_loss, best_path)
-                    logger.info(f"🏆 New best checkpoint saved to: {best_path} (mAP50: {self.best_map:.4f})")
+                    logger.info(f"  New best checkpoint saved to: {best_path} (mAP50: {self.best_map:.4f})")
                     patience_counter = 0
                 else:
                     patience_counter += 1
@@ -166,7 +168,7 @@ class BaseTrainer:
                 if avg_loss < self.best_loss:
                     self.best_loss = avg_loss
                     self.save_checkpoint(epoch, avg_loss, best_path)
-                    logger.info(f"🏆 New best checkpoint saved to: {best_path} (Loss: {self.best_loss:.4f})")
+                    logger.info(f"  New best checkpoint saved to: {best_path} (Loss: {self.best_loss:.4f})")
                     patience_counter = 0
                 else:
                     patience_counter += 1
@@ -189,7 +191,9 @@ class BaseTrainer:
             optimizer=self.optimizer,
             scheduler=self.scheduler,
             epoch=epoch,
-            loss=loss
+            loss=loss,
+            best_map=self.best_map,
+            config=self.config
         )
 
     def load_checkpoint(self, checkpoint_path: str) -> int:
@@ -202,5 +206,6 @@ class BaseTrainer:
             device=self.device
         )
         self.best_loss = status.get("loss", float("inf"))
+        self.best_map = status.get("best_map", 0.0)
         next_epoch = status.get("epoch", 0) + 1
         return next_epoch

@@ -43,6 +43,14 @@ def extract_model_state_dict(state: Any) -> dict:
         has_yolo_wrapper = any(k.startswith("model.model.") for k in state.keys())
         has_detr_wrapper = any(k.startswith("model.class_embed.") or k.startswith("model.query_embed.") for k in state.keys())
         
+        # Handle triple-prefixed keys (model.model.model.X -> model.model.X)
+        has_triple_prefix = any(k.startswith("model.model.model.") for k in state.keys())
+        if has_triple_prefix:
+            wrapped_sd = {}
+            for k, v in state.items():
+                wrapped_sd[k.replace("model.model.model.", "model.model.", 1)] = v
+            return wrapped_sd
+        
         if not (has_yolo_wrapper or has_detr_wrapper):
             wrapped_sd = {}
             for k, v in state.items():
@@ -98,7 +106,9 @@ class ModelFactory:
                 logger.info(f"Loading checkpoint weights from: {weights_path}")
                 state = torch.load(weights_path, map_location=device, weights_only=False)
                 state_dict = extract_model_state_dict(state)
-                model.load_state_dict(state_dict)
+                missing, unexpected = model.load_state_dict(state_dict, strict=False)
+                if missing or unexpected:
+                    logger.warning(f"Checkpoint loading: {len(missing)} missing keys, {len(unexpected)} unexpected keys")
             else:
                 logger.warning(f"Weights file not found at: {weights_path}. Model initialized with default weights.")
 

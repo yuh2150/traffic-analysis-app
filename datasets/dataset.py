@@ -4,6 +4,9 @@ from torch.utils.data import Dataset, DataLoader
 from typing import Tuple, List, Dict, Any, Optional
 import cv2
 import xml.etree.ElementTree as ET
+import logging
+
+logger_traffic = logging.getLogger("TrafficDataset")
 
 CLASS_MAP = {
     "car": 0,
@@ -25,6 +28,9 @@ class TrafficDataset(Dataset):
         self.images: List[Dict[str, Any]] = []
         self.annotations: Dict[int, List[Dict[str, Any]]] = {}
         self._load_detrac_annotations()
+        
+        total_anns = sum(len(anns) for anns in self.annotations.values())
+        logger_traffic.info(f"Loaded TrafficDataset: {len(self.images)} images and {total_anns} annotations.")
 
     def _load_detrac_annotations(self):
         img_id = 0
@@ -39,8 +45,12 @@ class TrafficDataset(Dataset):
             # Optimization: pre-scan directory once and do set lookups
             existing_files = set(os.listdir(seq_dir))
             
-            tree = ET.parse(xml_path)
-            root = tree.getroot()
+            try:
+                tree = ET.parse(xml_path)
+                root = tree.getroot()
+            except ET.ParseError as e:
+                logger_traffic.warning(f"Failed to parse XML file {xml_path}: {e}")
+                continue
             for frame in root.findall("frame"):
                 frame_num = int(frame.get("num", "0"))
                 img_file = f"img{frame_num:05d}.jpg"
@@ -113,12 +123,12 @@ class TrafficDataset(Dataset):
 
 
 import logging
-logger = logging.getLogger("CocoDataset")
+logger_coco = logging.getLogger("CocoDataset")
 
 class CocoDataset(Dataset):
     """Dataset class supporting MS COCO format with continuous 80-class mapping and synthetic fallback."""
 
-    def __init__(self, img_dir: str, anno_file: str, img_size: Tuple[int, int] = (640, 640), max_samples: Optional[int] = None):
+    def __init__(self, img_dir: str, anno_file: str, img_size: Tuple[int, int] = (640, 640), max_samples: Optional[int] = None, normalized: bool = True):
         self.img_dir = img_dir
         self.anno_file = anno_file
         self.img_size = img_size
@@ -143,20 +153,20 @@ class CocoDataset(Dataset):
         self.use_synthetic = False
         if not os.path.exists(img_dir):
             self.use_synthetic = True
-            logger.warning(f"COCO img_dir not found: {img_dir}. Using synthetic data fallback.")
-            self._load_synthetic(max_samples)
+            logger_coco.warning(f"COCO img_dir not found: {img_dir}. Using synthetic data fallback.")
+            self._load_synthetic()
         elif anno_file.lower().endswith(".json"):
             if not os.path.exists(anno_file):
                 self.use_synthetic = True
-                logger.warning(f"COCO JSON anno_file not found: {anno_file}. Using synthetic data fallback.")
-                self._load_synthetic(max_samples)
+                logger_coco.warning(f"COCO JSON anno_file not found: {anno_file}. Using synthetic data fallback.")
+                self._load_synthetic()
             else:
                 try:
-                    self._load_coco_annotations(max_samples)
+                    self._load_coco_annotations()
                 except Exception as e:
-                    logger.error(f"Error loading COCO JSON annotations: {e}. Falling back to synthetic.")
+                    logger_coco.error(f"Error loading COCO JSON annotations: {e}. Falling back to synthetic.")
                     self.use_synthetic = True
-                    self._load_synthetic(max_samples)
+                    self._load_synthetic()
         else:
             # Assume it is a directory containing YOLO .txt annotations (or try to auto-resolve parallel directory)
             yolo_anno_path = anno_file
@@ -167,21 +177,24 @@ class CocoDataset(Dataset):
                 candidate_labels = os.path.join(os.path.dirname(parent_dir), "labels", last_dir)
                 if os.path.isdir(candidate_labels):
                     yolo_anno_path = candidate_labels
-                    logger.info(f"Auto-resolved parallel YOLO labels directory: {yolo_anno_path}")
+                    logger_coco.info(f"Auto-resolved parallel YOLO labels directory: {yolo_anno_path}")
                 else:
                     self.use_synthetic = True
-                    logger.warning(f"YOLO annotation path not found: {anno_file}. Using synthetic fallback.")
-                    self._load_synthetic(max_samples)
+                    logger_coco.warning(f"YOLO annotation path not found: {anno_file}. Using synthetic fallback.")
+                    self._load_synthetic()
 
             if not self.use_synthetic:
                 try:
-                    self._load_yolo_annotations(img_dir, yolo_anno_path, max_samples)
+                    self._load_yolo_annotations(img_dir, yolo_anno_path, normalized=normalized)
                 except Exception as e:
-                    logger.error(f"Error loading YOLO TXT annotations: {e}. Falling back to synthetic.")
+                    logger_coco.error(f"Error loading YOLO TXT annotations: {e}. Falling back to synthetic.")
                     self.use_synthetic = True
-                    self._load_synthetic(max_samples)
+                    self._load_synthetic()
 
-    def _load_yolo_annotations(self, img_dir: str, anno_dir: str, max_samples: Optional[int]):
+        total_anns = sum(len(anns) for anns in self.annotations.values())
+        logger_coco.info(f"Loaded CocoDataset: {len(self.images)} images and {total_anns} annotations.")
+
+    def _load_yolo_annotations(self, img_dir: str, anno_dir: str, normalized: bool = True):
         valid_exts = (".jpg", ".jpeg", ".png", ".bmp", ".webp")
         img_files = sorted([f for f in os.listdir(img_dir) if f.lower().endswith(valid_exts)])
 
@@ -190,8 +203,18 @@ class CocoDataset(Dataset):
             base_name = os.path.splitext(f)[0]
             label_path = os.path.join(anno_dir, base_name + ".txt")
 
-            # Default to 640x640 relative box coords
+            # Default dimensions. We only determine actual image dimensions if normalized is False.
             w_img, h_img = 640, 640
+            if not normalized:
+                img_path = os.path.join(img_dir, f)
+                try:
+                    from PIL import Image
+                    with Image.open(img_path) as img:
+                        w_img, h_img = img.size
+                except Exception:
+                    img_bgr = cv2.imread(img_path)
+                    if img_bgr is not None:
+                        h_img, w_img = img_bgr.shape[:2]
 
             self.images.append({
                 "id": img_id,
@@ -212,6 +235,12 @@ class CocoDataset(Dataset):
                             w = float(parts[3])
                             h = float(parts[4])
 
+                            if not normalized:
+                                xc /= w_img
+                                yc /= h_img
+                                w /= w_img
+                                h /= h_img
+
                             # Convert cx, cy, w, h normalized coordinates to relative x1, y1, x2, y2
                             x1 = xc - w / 2
                             y1 = yc - h / 2
@@ -229,10 +258,8 @@ class CocoDataset(Dataset):
                                 "category_id": class_idx
                             })
             img_id += 1
-            if max_samples is not None and img_id >= max_samples:
-                break
 
-    def _load_coco_annotations(self, max_samples: Optional[int]):
+    def _load_coco_annotations(self):
         import json
         with open(self.anno_file, "r") as f:
             data = json.load(f)
@@ -275,11 +302,8 @@ class CocoDataset(Dataset):
         for img_id in valid_img_ids:
             self.images.append(images_dict[img_id])
 
-        if max_samples is not None:
-            self.images = self.images[:max_samples]
-
-    def _load_synthetic(self, max_samples: Optional[int]):
-        num_samples = max_samples if max_samples is not None else 10
+    def _load_synthetic(self):
+        num_samples = 10
         import random
         for i in range(num_samples):
             self.images.append({

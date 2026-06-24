@@ -4,13 +4,15 @@ import sys
 import argparse
 import logging
 import torch
+import torch.nn as nn
+import datetime
 import warnings
 warnings.filterwarnings("ignore", category=FutureWarning)
 
 # Ensure project root is in python path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from models.factory import ModelFactory
+from models.factory import ModelFactory, extract_model_state_dict
 from datasets.factory import DatasetFactory
 from training.trainer import TrafficTrainer
 from pruning.base import PRUNER_REGISTRY
@@ -39,6 +41,8 @@ def main():
     parser.add_argument("--max-samples", type=int, default=None, help="Limit number of dataset samples")
     parser.add_argument("--patience", type=int, default=10, help="Early stopping patience epochs")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility")
+    parser.add_argument("--force", action="store_true", help="Force re-train from scratch, ignoring resume checkpoints")
+    parser.add_argument("--skip-resume", action="store_true", help="Skip resuming and start training from scratch")
     args = parser.parse_args()
 
     # Enforce reproducibility
@@ -49,11 +53,11 @@ def main():
     logger.info(f"Using device: {device}")
 
     artifact_manager = ArtifactManager()
-    model_dir = artifact_manager.get_model_dir(args.model)
-    pruned_pt = artifact_manager.get_checkpoint_path(args.model, f"{args.prune_type}_{args.sparsity}.pt")
+    recovered_dir = artifact_manager.get_recovered_dir(args.model)
+    pruned_pt = artifact_manager.get_pruned_checkpoint(args.model, args.prune_type, args.sparsity)
 
     # Configure file logging to write epoch logs to train.log
-    log_file = os.path.join(model_dir, "train.log")
+    log_file = os.path.join(recovered_dir, "train.log")
     file_handler = logging.FileHandler(log_file, mode="a")
     file_handler.setFormatter(logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s"))
     logging.getLogger().addHandler(file_handler)
@@ -76,7 +80,18 @@ def main():
 
     # Load weights
     logger.info(f"Loading pruned weight state from: {pruned_pt}")
-    model.load_state_dict(torch.load(pruned_pt, map_location=device, weights_only=False), strict=False)
+    model.load_state_dict(extract_model_state_dict(torch.load(pruned_pt, map_location=device, weights_only=False)), strict=False)
+
+    # Verify loaded model sparsity
+    total_weights = 0
+    zero_weights = 0
+    for name, module in model.named_modules():
+        if isinstance(module, (nn.Conv2d, nn.Linear)):
+            w = module.weight.data
+            total_weights += w.numel()
+            zero_weights += (w == 0.0).sum().item()
+    loaded_sparsity = zero_weights / total_weights if total_weights > 0 else 0.0
+    logger.info(f"Verified loaded model sparsity: {loaded_sparsity*100:.2f}% (Expected target: {args.sparsity*100:.2f}%)")
 
     # Determine paths based on dataset
     if args.dataset == "coco":
@@ -111,69 +126,98 @@ def main():
         dataset_type=args.dataset,
     )
 
+
+
+
     # 3. Setup optimizer and scheduler (Optimizer only updates parameters that require gradients)
     optimizer = torch.optim.AdamW([p for p in model.parameters() if p.requires_grad], lr=args.lr, weight_decay=1e-4)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
 
     # 4. Traffic Trainer
-    model_name_base = f"{args.prune_type}_{args.sparsity}_recover"
+    model_name_base = f"{args.prune_type}_{args.sparsity}"
     trainer = TrafficTrainer(
         model=model,
         train_loader=train_loader,
         optimizer=optimizer,
         scheduler=scheduler,
         device=device,
-        checkpoint_dir=model_dir,
+        checkpoint_dir=recovered_dir,
         model_name=model_name_base,
         val_loader=val_loader,
-        patience=args.patience
+        patience=args.patience,
+        config=vars(args)
     )
 
     start_epoch = 1
-    last_pt = os.path.join(model_dir, f"{model_name_base}_last.pt")
+    last_pt = artifact_manager.get_recovered_checkpoint(args.model, args.prune_type, args.sparsity, suffix='last')
     
-    # Auto-resume if last_pt exists
-    if os.path.exists(last_pt):
+    # Auto-resume if last_pt exists (skipped when --force or --skip-resume is used)
+    if os.path.exists(last_pt) and not args.force and not args.skip_resume:
         logger.info(f"Resuming recovery training from checkpoint: {last_pt}")
-        start_epoch = trainer.load_checkpoint(last_pt)
+        try:
+            start_epoch = trainer.load_checkpoint(last_pt)
+        except Exception as e:
+            logger.warning(f"Failed to resume from checkpoint: {e}. Starting from scratch.")
 
     # Run training loop
     logger.info(f"Starting recovery training for {args.epochs} epochs...")
     history = trainer.train(args.epochs, start_epoch=start_epoch)
 
     # Save recovery history to a JSON file
-    recovery_history = artifact_manager.get_checkpoint_path(args.model, f"{args.prune_type}_{args.sparsity}_recover_history.json")
+    recovery_history = os.path.join(recovered_dir, f"{model_name_base}_history.json")
     artifact_manager.save_metadata(history, recovery_history)
     logger.info(f"Saved recovery epoch history to: {recovery_history}")
 
-    # Copy the best checkpoint to recovered_pt for downstream compatibility
-    recovered_pt = artifact_manager.get_checkpoint_path(args.model, f"{args.prune_type}_{args.sparsity}_recovered.pt")
-    recovered_meta = artifact_manager.get_checkpoint_path(args.model, f"{args.prune_type}_{args.sparsity}_recovered_metadata.json")
+    best_pt = artifact_manager.get_recovered_checkpoint(args.model, args.prune_type, args.sparsity, suffix='best')
+    recovered_meta = artifact_manager.get_metadata_path(best_pt)
     
-    best_pt = os.path.join(model_dir, f"{model_name_base}_best.pt")
     if os.path.exists(best_pt):
-        import shutil
-        shutil.copy(best_pt, recovered_pt)
-        logger.info(f"Copied best recovered weights from {best_pt} to {recovered_pt}")
-        
         # Load best weights back to model for metadata calculations
         checkpoint = torch.load(best_pt, map_location=device, weights_only=False)
         state_dict = checkpoint["model_state_dict"] if "model_state_dict" in checkpoint else checkpoint
         model.load_state_dict(state_dict, strict=False)
     else:
-        torch.save(model.state_dict(), recovered_pt)
-        logger.info(f"Saved final recovered weights directly to: {recovered_pt}")
+        # Save a proper dictionary checkpoint as fallback
+        checkpoint = {
+            "model_state_dict": model.state_dict(),
+            "epoch": args.epochs,
+            "loss": history[-1].get("loss", 0.0) if (isinstance(history, list) and len(history) > 0) else 0.0,
+            "best_map": trainer.best_map,
+            "config": vars(args),
+        }
+        if optimizer is not None:
+            checkpoint["optimizer_state_dict"] = optimizer.state_dict()
+        if scheduler is not None:
+            checkpoint["scheduler_state_dict"] = scheduler.state_dict()
+        torch.save(checkpoint, best_pt)
+        logger.info(f"Saved fallback recovered model dictionary to {best_pt}.")
+
+    # Calculate actual sparsity after loading/finetuning
+    total_weights = 0
+    zero_weights = 0
+    for name, module in model.named_modules():
+        if isinstance(module, (nn.Conv2d, nn.Linear)):
+            w = module.weight.data
+            total_weights += w.numel()
+            zero_weights += (w == 0.0).sum().item()
+    actual_sparsity = zero_weights / total_weights if total_weights > 0 else 0.0
 
     # Save recovery metadata
+    best_map_val = trainer.best_map
+
     artifact_manager.save_metadata({
         "pruning_method": args.prune_type,
         "sparsity": args.sparsity,
+        "actual_sparsity": actual_sparsity,
         "epochs_recover": args.epochs,
         "lr": args.lr,
         "batch_size": args.batch_size,
-        "best_map": history.get("best_map", 0.0),
+        "best_map": best_map_val,
         "params": model.get_params_count(),
-        "flops": model.calculate_flops((3,) + img_size)
+        "flops": model.calculate_flops((3,) + img_size),
+        "config": vars(args),
+        "timestamp": datetime.datetime.now().isoformat(),
+        "torch_version": torch.__version__
     }, recovered_meta)
 
     logger.info("Stage C: Recovery fine-tuning completed successfully!")

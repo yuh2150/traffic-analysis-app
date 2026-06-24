@@ -82,12 +82,18 @@ class BasePruner:
 
     def collect_statistics(self) -> Dict[str, Any]:
         """Compiles model structural statistics."""
-        active_params = 0
         total_params = 0
         for p in self.model.parameters():
             total_params += p.numel()
-            active_params += (p.data != 0).sum().item()
 
+        zero_weights = 0
+        for module in self.model.modules():
+            if hasattr(module, 'weight') and module.weight is not None:
+                zero_weights += (module.weight == 0.0).sum().item()
+            if hasattr(module, 'bias') and module.bias is not None:
+                zero_weights += (module.bias == 0.0).sum().item()
+
+        active_params = total_params - zero_weights
         size_mb = sum(p.numel() * p.element_size() for p in self.model.parameters()) / (1024 ** 2)
 
         return {

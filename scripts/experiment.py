@@ -38,6 +38,7 @@ def main():
     parser.add_argument("--checkpoints-dir", type=str, default="checkpoints", help="Folder to save artifacts")
     parser.add_argument("--device", type=str, default="cuda", choices=["cuda", "cpu"], help="Inference device")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility")
+    parser.add_argument("--skip-train", "--skip_train", action="store_true", help="Skip training baseline if checkpoint already exists")
     args = parser.parse_args()
 
     # Enforce reproducibility
@@ -83,7 +84,8 @@ def main():
         coco_train_img=args.coco_train_img,
         coco_train_anno=args.coco_train_anno,
         coco_val_img=args.coco_val_img,
-        coco_val_anno=args.coco_val_anno
+        coco_val_anno=args.coco_val_anno,
+        skip_train=args.skip_train
     )
 
     results = manager.run_all()

@@ -302,7 +302,7 @@ class YOLOv5Wrapper(BaseTrafficDetector):
             self.model.eval()
             with torch.no_grad():
                 out = self.model(x)
-            if isinstance(out, tuple):
+            if isinstance(out, (tuple, list)):
                 decoded = out[0]
             else:
                 decoded = out

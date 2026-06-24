@@ -1,0 +1,24 @@
+import torch
+from models.factory import ModelFactory, extract_model_state_dict
+from pruning.magnitude import MagnitudePruner
+
+# Load model (chưa có mask)
+model = ModelFactory.load('yolov5s', num_classes=80)
+# Tạo pruner để đăng ký mask
+pruner = MagnitudePruner(model, 0.3)
+model = pruner.prune()  # tạo mask buffer
+
+# Load state_dict đã lưu
+state = torch.load('checkpoints/yolov5s/pruned/magnitude_0.3.pt', map_location='cpu')
+state_dict = extract_model_state_dict(state)
+model.load_state_dict(state_dict, strict=False)
+
+# Tính sparsity
+total = 0
+zero = 0
+for name, module in model.named_modules():
+    if hasattr(module, 'weight'):
+        w = module.weight
+        total += w.numel()
+        zero += (w == 0).sum().item()
+print(f"Sparsity: {zero/total*100:.2f}%")

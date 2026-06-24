@@ -18,6 +18,8 @@ class DatasetFactory:
         shuffle: bool = False,
         max_samples: Optional[int] = None,
         dataset_type: str = "detrac",
+        num_workers: int = 0,
+        normalized: bool = True,
     ) -> DataLoader:
         """Instantiates and returns a DataLoader for the selected dataset.
 
@@ -29,18 +31,21 @@ class DatasetFactory:
             shuffle: Whether to shuffle data.
             max_samples: If set, subsets the dataset for speed.
             dataset_type: Dataset format type ('detrac' or 'coco').
+            num_workers: Number of subprocesses for data loading.
+            normalized: Whether YOLO coordinates are normalized.
         """
         logger.info(f"Initializing {dataset_type.upper()} dataset loader from: {img_dir}")
         if dataset_type.lower() == "coco":
             # For COCO, anno_dir is the path to the annotation JSON file
-            dataset = CocoDataset(img_dir=img_dir, anno_file=anno_dir, img_size=img_size, max_samples=max_samples)
+            dataset = CocoDataset(img_dir=img_dir, anno_file=anno_dir, img_size=img_size, normalized=normalized)
         else:
             dataset = TrafficDataset(img_dir=img_dir, anno_dir=anno_dir, img_size=img_size)
-            # Apply dataset subsetting if max_samples is requested for DETRAC
-            if max_samples is not None and 0 < max_samples < len(dataset):
-                logger.info(f"Subsetting dataset to the first {max_samples} samples.")
-                indices = list(range(max_samples))
-                dataset = Subset(dataset, indices)
+
+        # Apply dataset subsetting if max_samples is requested (unified for both datasets)
+        if max_samples is not None and 0 < max_samples < len(dataset):
+            logger.info(f"Subsetting dataset to the first {max_samples} samples.")
+            indices = list(range(max_samples))
+            dataset = Subset(dataset, indices)
 
         def collate_fn(batch):
             return tuple(zip(*batch))
@@ -49,7 +54,10 @@ class DatasetFactory:
             dataset,
             batch_size=batch_size,
             shuffle=shuffle,
-            num_workers=0,
+            num_workers=num_workers,
             collate_fn=collate_fn
         )
+
+
+
 

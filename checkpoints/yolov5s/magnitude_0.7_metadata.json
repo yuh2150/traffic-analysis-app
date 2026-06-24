@@ -1,9 +1,0 @@
-{
-    "pruning_method": "magnitude",
-    "sparsity": 0.7,
-    "actual_sparsity": 0.6990054505434282,
-    "params": 2174952,
-    "flops": 4947152193,
-    "compression_ratio": 3.3223192971615005,
-    "size_reduction_mb": 19.267780303955078
-}

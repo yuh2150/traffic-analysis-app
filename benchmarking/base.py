@@ -22,26 +22,40 @@ class BaseBenchmark:
         # Calculate parameters count (total parameters)
         params = sum(p.numel() for p in model.parameters())
         
-        # Calculate model size in MB
+        # Calculate model size in MB (exclude pruning_mask buffers — they are temporary artifacts)
         param_size = sum(p.numel() * p.element_size() for p in model.parameters())
-        buffer_size = sum(b.numel() * b.element_size() for b in model.buffers())
+        buffer_size = sum(b.numel() * b.element_size() for name, b in model.named_buffers() if "pruning_mask" not in name)
         size_mb = (param_size + buffer_size) / (1024 ** 2)
         
         # Calculate FLOPs using validator/thop/fvcore if available
+        flops = None
         try:
             from thop import profile
-            x = torch.zeros(1, *self.img_size, device=self.device)
-            macs, _ = profile(model, inputs=(x,), verbose=False)
-            flops = int(macs * 2)
-        except Exception:
             try:
-                from fvcore.nn import FlopCountAnalysis
                 x = torch.zeros(1, *self.img_size, device=self.device)
-                flops = FlopCountAnalysis(model, x).total()
-            except Exception:
-                logger.warning("Dynamic FLOP profiling failed. Using fallback estimation.")
-                active_params = sum(p.numel() for p in model.parameters() if (p != 0).any())
-                flops = int(active_params * 2 * 10)
+                macs, _ = profile(model, inputs=(x,), verbose=False)
+                flops = int(macs * 2)
+            except Exception as e:
+                logger.error(f"Error executing thop profiling: {e}")
+        except ImportError:
+            logger.warning("thop library is not installed.")
+
+        if flops is None:
+            try:
+                # pyrefly: ignore [missing-import]
+                from fvcore.nn import FlopCountAnalysis
+                try:
+                    x = torch.zeros(1, *self.img_size, device=self.device)
+                    flops = FlopCountAnalysis(model, x).total()
+                except Exception as e:
+                    logger.error(f"Error executing fvcore profiling: {e}")
+            except ImportError:
+                logger.warning("fvcore library is not installed.")
+
+        if flops is None:
+            logger.warning("Using fallback estimation for FLOPs.")
+            active_params = sum(p.numel() for p in model.parameters() if (p != 0).any())
+            flops = int(active_params * 2 * 10)
                 
         # Calculate actual global sparsity
         total_weights = 0

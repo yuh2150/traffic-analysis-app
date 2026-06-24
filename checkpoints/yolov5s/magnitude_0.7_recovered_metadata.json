@@ -1,6 +1,0 @@
-{
-    "pruning_method": "magnitude",
-    "sparsity": 0.7,
-    "epochs_recover": 10,
-    "best_map": 0.0
-}

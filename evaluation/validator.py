@@ -34,49 +34,57 @@ def bbox_iou_numpy(box1: np.ndarray, box2: np.ndarray) -> np.ndarray:
 class Validator:
     """Class to manage validation calculations and performance profiling."""
 
-    def __init__(self, model: BaseTrafficDetector, device: torch.device):
+    def __init__(self, model: BaseTrafficDetector, device: torch.device, num_classes: int = None):
         self.model = model
         self.device = device
+        self.num_classes = num_classes if num_classes is not None else getattr(model, "num_classes", None)
 
     def gather_predictions(self, dataloader: DataLoader) -> Tuple[List[Dict[str, np.ndarray]], List[Dict[str, np.ndarray]]]:
         """Runs model inference over the loader to collect predicted and ground truth annotations."""
+        if dataloader is None or len(dataloader) == 0 or len(dataloader.dataset) == 0:
+            raise ValueError("Dataloader is empty.")
+
         self.model.eval()
         all_preds = []
         all_gts = []
         
         with torch.no_grad():
             for imgs, targets in dataloader:
-                batch_imgs = torch.stack(imgs).to(self.device)
-                outputs = self.model(batch_imgs)
-                
-                for i in range(len(imgs)):
-                    img_id = targets[i]["image_id"].item()
-                    gt_boxes = targets[i]["boxes"].cpu().numpy()
-                    gt_labels = targets[i]["labels"].cpu().numpy()
+                try:
+                    batch_imgs = torch.stack(imgs).to(self.device)
+                    outputs = self.model(batch_imgs)
                     
-                    pred_boxes = outputs["boxes"][i].cpu().numpy()
-                    pred_scores = outputs["scores"][i].cpu().numpy()
-                    pred_labels = outputs["class_ids"][i].cpu().numpy()
-                    
-                    keep = pred_scores >= 0.05
-                    all_preds.append({
-                        "image_id": img_id,
-                        "boxes": pred_boxes[keep],
-                        "scores": pred_scores[keep],
-                        "labels": pred_labels[keep],
-                    })
-                    all_gts.append({
-                        "image_id": img_id,
-                        "boxes": gt_boxes,
-                        "labels": gt_labels,
-                    })
+                    for i in range(len(imgs)):
+                        img_id = targets[i]["image_id"].item()
+                        gt_boxes = targets[i]["boxes"].cpu().numpy()
+                        gt_labels = targets[i]["labels"].cpu().numpy()
+                        
+                        pred_boxes = outputs["boxes"][i].cpu().numpy()
+                        pred_scores = outputs["scores"][i].cpu().numpy()
+                        pred_labels = outputs["class_ids"][i].cpu().numpy()
+                        
+                        keep = pred_scores >= 0.05
+                        all_preds.append({
+                            "image_id": img_id,
+                            "boxes": pred_boxes[keep],
+                            "scores": pred_scores[keep],
+                            "labels": pred_labels[keep],
+                        })
+                        all_gts.append({
+                            "image_id": img_id,
+                            "boxes": gt_boxes,
+                            "labels": gt_labels,
+                        })
+                except Exception as e:
+                    logger.error(f"Error processing batch in gather_predictions: {e}")
+                    continue
         return all_preds, all_gts
 
     def calculate_accuracy_metrics(
         self, all_preds: List[Dict[str, np.ndarray]], all_gts: List[Dict[str, np.ndarray]]
     ) -> Dict[str, float]:
         """Computes Precision, Recall, mAP50, and mAP50-95."""
-        num_classes = self.model.num_classes
+        num_classes = self.num_classes if self.num_classes is not None else getattr(self.model, "num_classes", 80)
         iou_thresholds = sorted(list(set([0.5] + np.linspace(0.5, 0.95, 10).tolist())))
         aps = {iou: [] for iou in iou_thresholds}
         total_tp_50 = 0
@@ -101,7 +109,14 @@ class Validator:
                 
             total_gts += num_cls_gts
             if num_cls_gts == 0:
-                continue
+                if num_classes == 80:
+                    logger.warning(f"Class {cls} has no ground truth annotations (num_cls_gts = 0). Skipping AP calculation for this class (COCO style).")
+                    continue
+                else:
+                    logger.warning(f"Class {cls} has no ground truth annotations (num_cls_gts = 0). Appending AP = 0.0 for this class (VOC/DETRAC style).")
+                    for iou in iou_thresholds:
+                        aps[iou].append(0.0)
+                    continue
 
             cls_preds = sorted(cls_preds, key=lambda x: x["score"], reverse=True)
             gt_tracked = {}

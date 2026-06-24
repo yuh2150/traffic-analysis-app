@@ -47,14 +47,13 @@ def main():
     logger.info(f"Using device: {device}")
 
     artifact_manager = ArtifactManager()
-    model_dir = artifact_manager.get_model_dir(args.model)
+    baseline_dir = artifact_manager.get_baseline_dir(args.model)
     
-    model_name_base = "coco_baseline" if args.dataset == "coco" else "baseline"
-    baseline_pt = artifact_manager.get_checkpoint_path(args.model, f"{model_name_base}.pt")
-    baseline_meta = artifact_manager.get_checkpoint_path(args.model, f"{model_name_base}_metadata.json")
+    baseline_pt = artifact_manager.get_baseline_checkpoint(args.model, suffix='best')
+    baseline_meta = artifact_manager.get_metadata_path(baseline_pt)
 
     # Configure file logging to write epoch logs to train.log
-    log_file = os.path.join(model_dir, "train.log")
+    log_file = os.path.join(baseline_dir, "train.log")
     file_handler = logging.FileHandler(log_file, mode="a" if args.resume else "w")
     file_handler.setFormatter(logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s"))
     logging.getLogger().addHandler(file_handler)
@@ -100,6 +99,9 @@ def main():
         dataset_type=args.dataset,
     )
 
+
+
+
     # Optimizer & Scheduler
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
@@ -111,14 +113,15 @@ def main():
         optimizer=optimizer,
         scheduler=scheduler,
         device=device,
-        checkpoint_dir=model_dir,
-        model_name=model_name_base,
+        checkpoint_dir=baseline_dir,
+        model_name="",
         val_loader=val_loader,
-        patience=args.patience
+        patience=args.patience,
+        config=vars(args)
     )
 
     start_epoch = 1
-    last_pt = os.path.join(model_dir, f"{model_name_base}_last.pt")
+    last_pt = artifact_manager.get_baseline_checkpoint(args.model, suffix='last')
     
     # Auto-resume if last_pt exists, or use explicitly passed --resume path
     resume_path = args.resume if args.resume else (last_pt if os.path.exists(last_pt) else "")
@@ -130,25 +133,35 @@ def main():
     history = trainer.train(args.epochs, start_epoch=start_epoch)
 
     # Save training history to a JSON file
-    baseline_history = artifact_manager.get_checkpoint_path(args.model, f"{model_name_base}_history.json")
+    baseline_history = os.path.join(baseline_dir, "history.json")
     artifact_manager.save_metadata(history, baseline_history)
     logger.info(f"Saved training epoch history to: {baseline_history}")
 
-    # Copy the best model checkpoint to baseline_pt for backwards compatibility
-    best_pt = os.path.join(model_dir, f"{model_name_base}_best.pt")
+    # Load best weights back to model for metadata flops calculations
+    best_pt = artifact_manager.get_baseline_checkpoint(args.model, suffix='best')
     if os.path.exists(best_pt):
-        import shutil
-        shutil.copy(best_pt, baseline_pt)
-        logger.info(f"Copied best model {best_pt} to {baseline_pt} for compatibility.")
-        
-        # Load best weights back to model for metadata flops calculations
         checkpoint = torch.load(best_pt, map_location=device, weights_only=False)
         state_dict = checkpoint["model_state_dict"] if "model_state_dict" in checkpoint else checkpoint
         model.load_state_dict(state_dict, strict=False)
     else:
-        torch.save(model.state_dict(), baseline_pt)
+        # Save a proper dictionary checkpoint as fallback
+        checkpoint = {
+            "model_state_dict": model.state_dict(),
+            "epoch": args.epochs,
+            "loss": history[-1].get("loss", 0.0) if (isinstance(history, list) and len(history) > 0) else 0.0,
+            "best_map": trainer.best_map,
+            "config": vars(args),
+        }
+        if optimizer is not None:
+            checkpoint["optimizer_state_dict"] = optimizer.state_dict()
+        if scheduler is not None:
+            checkpoint["scheduler_state_dict"] = scheduler.state_dict()
+        torch.save(checkpoint, best_pt)
+        logger.info(f"Saved fallback model dictionary to {best_pt}.")
 
     # Save baseline metadata
+    best_map_val = trainer.best_map
+
     artifact_manager.save_metadata({
         "params": model.get_params_count(),
         "flops": model.calculate_flops((3,) + img_size),
@@ -156,7 +169,7 @@ def main():
         "epochs": args.epochs,
         "lr": args.lr,
         "batch_size": args.batch_size,
-        "best_map": history.get("best_map", 0.0)
+        "best_map": best_map_val
     }, baseline_meta)
     
     logger.info("Stage A: Baseline training completed successfully!")

@@ -26,6 +26,48 @@ class ArtifactManager:
         model_dir = self.get_model_dir(model_name)
         return os.path.join(model_dir, stage_filename)
 
+    def get_baseline_dir(self, model_name: str) -> str:
+        """Returns the baseline directory path for the given model, ensuring it exists."""
+        model_dir = self.get_model_dir(model_name)
+        d = os.path.join(model_dir, "baseline")
+        os.makedirs(d, exist_ok=True)
+        return d
+
+    def get_pruned_dir(self, model_name: str) -> str:
+        """Returns the pruned directory path for the given model, ensuring it exists."""
+        model_dir = self.get_model_dir(model_name)
+        d = os.path.join(model_dir, "pruned")
+        os.makedirs(d, exist_ok=True)
+        return d
+
+    def get_recovered_dir(self, model_name: str) -> str:
+        """Returns the recovered directory path for the given model, ensuring it exists."""
+        model_dir = self.get_model_dir(model_name)
+        d = os.path.join(model_dir, "recovered")
+        os.makedirs(d, exist_ok=True)
+        return d
+
+    def get_baseline_checkpoint(self, model_name: str, suffix: str = 'best') -> str:
+        """Returns baseline checkpoint path: .../baseline/{suffix}.pt"""
+        d = self.get_baseline_dir(model_name)
+        return os.path.join(d, f"{suffix}.pt")
+
+    def get_pruned_checkpoint(self, model_name: str, method: str, sparsity: Union[float, str]) -> str:
+        """Returns pruned checkpoint path: .../pruned/{method}_{sparsity}.pt"""
+        d = self.get_pruned_dir(model_name)
+        return os.path.join(d, f"{method}_{sparsity}.pt")
+
+    def get_recovered_checkpoint(self, model_name: str, method: str, sparsity: Union[float, str], suffix: str = 'best') -> str:
+        """Returns recovered checkpoint path: .../recovered/{method}_{sparsity}_{suffix}.pt"""
+        d = self.get_recovered_dir(model_name)
+        return os.path.join(d, f"{method}_{sparsity}_{suffix}.pt")
+
+    def get_metadata_path(self, checkpoint_path: str) -> str:
+        """Returns metadata JSON file path corresponding to the checkpoint (.pt -> _metadata.json)."""
+        if checkpoint_path.endswith(".pt"):
+            return checkpoint_path[:-3] + "_metadata.json"
+        return checkpoint_path + "_metadata.json"
+
     def save_checkpoint(
         self,
         model: nn.Module,
@@ -34,8 +76,10 @@ class ArtifactManager:
         scheduler: Optional[Any] = None,
         epoch: int = 0,
         loss: float = 0.0,
+        best_map: float = 0.0,
+        config: Optional[Dict[str, Any]] = None,
     ) -> None:
-        """Saves a model checkpoint including optimizer, scheduler, and epoch info."""
+        """Saves a model checkpoint including optimizer, scheduler, epoch, best_map, and config info."""
         # Strip thop profile keys if present in weights
         state_dict = model.state_dict()
         clean_state_dict = {k: v for k, v in state_dict.items() if not k.endswith("total_ops") and not k.endswith("total_params")}
@@ -43,7 +87,9 @@ class ArtifactManager:
         state = {
             "model_state_dict": clean_state_dict,
             "epoch": epoch,
-            "loss": loss
+            "loss": loss,
+            "best_map": best_map,
+            "config": config
         }
         if optimizer is not None:
             state["optimizer_state_dict"] = optimizer.state_dict()
@@ -78,12 +124,14 @@ class ArtifactManager:
             
             return {
                 "epoch": checkpoint.get("epoch", 0),
-                "loss": checkpoint.get("loss", 0.0)
+                "loss": checkpoint.get("loss", 0.0),
+                "best_map": checkpoint.get("best_map", 0.0),
+                "config": checkpoint.get("config", None)
             }
         else:
             # Raw state dict loading
             model.load_state_dict(checkpoint, strict=False)
-            return {"epoch": 0, "loss": 0.0}
+            return {"epoch": 0, "loss": 0.0, "best_map": 0.0, "config": None}
 
     def save_metadata(self, metadata: Dict[str, Any], save_path: str) -> None:
         """Saves run or architecture metadata to a JSON file."""
