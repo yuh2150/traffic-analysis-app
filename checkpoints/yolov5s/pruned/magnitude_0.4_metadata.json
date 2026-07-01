@@ -1,0 +1,26 @@
+{
+    "pruning_method": "magnitude",
+    "sparsity": 0.4,
+    "actual_sparsity": 0.3862755685976248,
+    "compression_ratio": 1.6293957822649747,
+    "base_params": 7235389,
+    "pruned_params": 4440535,
+    "removed_params": 2794854,
+    "base_flops": 16625254400,
+    "actual_flops": 16625254400,
+    "theoretical_flops": 10203324803,
+    "removed_flops_theoretical": 6421929597,
+    "size_reduction_mb": 10.661521911621094,
+    "config": {
+        "model": "yolov5s",
+        "prune_type": "magnitude",
+        "sparsity": 0.4,
+        "dataset": "coco",
+        "seed": 42,
+        "pretrained": false,
+        "force": true
+    },
+    "timestamp": "2026-07-01T10:17:44.884594",
+    "torch_version": "2.12.1+cpu",
+    "checkpoint_format_info": "Since magnitude pruning uses PyTorch's dynamic pruning hooks, the checkpoint contains weight_orig and weight_mask. To reload, register pruning buffers first."
+}

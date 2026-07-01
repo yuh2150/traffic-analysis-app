@@ -194,7 +194,7 @@ class ExperimentManager:
                 
                 # Run evaluation on baseline
                 benchmark = TrafficBenchmark(model_name, self.device, (3,) + img_size_tuple)
-                baseline_results = benchmark.evaluate_checkpoint(model, val_loader)
+                baseline_results = benchmark.evaluate_checkpoint(model, val_loader, checkpoint_path=baseline_pt)
                 baseline_results["Config"] = "Baseline FP32"
                 baseline_results["Compression Ratio"] = 1.0
                 baseline_results["Throughput (img/s)"] = baseline_results["FPS"]
@@ -252,7 +252,10 @@ class ExperimentManager:
                         pruner = pruner_cls(pruned_model, sparsity)
                         pruned_model = pruner.prune()
                         
-                        torch.save(pruned_model.state_dict(), pruned_pt)
+                        from utils.pipeline_utils import get_clean_state_dict
+                        from utils.sparsity import state_dict_to_sparse
+                        sparse_sd = state_dict_to_sparse(get_clean_state_dict(pruned_model), threshold=0.1)
+                        torch.save(sparse_sd, pruned_pt)
                         
                         # Collect and save pruning metadata
                         stats = pruner.collect_statistics()
@@ -275,10 +278,10 @@ class ExperimentManager:
                         }, pruned_meta)
                     else:
                         logger.info(f"Pruned checkpoint already exists. Loading {pruned_pt}...")
+                        pruned_model = ModelFactory.load(model_name, weights_path=pruned_pt, device=self.device, num_classes=num_classes)
                         pruner_cls = PRUNER_REGISTRY[prune_type]
                         pruner = pruner_cls(pruned_model, sparsity)
                         pruned_model = pruner.prune()
-                        pruned_model.load_state_dict(extract_model_state_dict(torch.load(pruned_pt, map_location=self.device, weights_only=False)), strict=False)
                         
                         # Verify sparsity
                         total_weights = 0
@@ -298,6 +301,17 @@ class ExperimentManager:
                     # Ensure recovered weight is generated
                     if not os.path.exists(recovered_pt):
                         logger.info(f"Recovered checkpoint not found. Fine-tuning recovery for {self.epochs_recover} epochs...")
+                        
+                        # For gradual pruning, start from baseline model or a partially pruned model
+                        is_gradual = (prune_type == "magnitude" and sparsity >= 0.5)
+                        if is_gradual:
+                            logger.info(f"Using gradual pruning training for sparsity {sparsity}. Cloning baseline model...")
+                            pruned_model = copy.deepcopy(baseline_model_clone)
+                            # Start with 30% sparsity
+                            pruner_cls = PRUNER_REGISTRY[prune_type]
+                            pruner = pruner_cls(pruned_model, 0.3)
+                            pruned_model = pruner.prune()
+
                         # Optimizer only updates parameters that require gradients
                         optimizer_p = torch.optim.AdamW([p for p in pruned_model.parameters() if p.requires_grad], lr=self.lr, weight_decay=1e-4)
                         scheduler_p = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer_p, T_max=self.epochs_recover)
@@ -311,22 +325,27 @@ class ExperimentManager:
                             device=self.device,
                             checkpoint_dir=recovered_dir,
                             model_name=f"{prune_type}_{sparsity}",
-                            val_loader=val_loader
+                            val_loader=val_loader,
+                            config={"prune_type": prune_type, "sparsity": sparsity}
                         )
                         trainer_p.train(self.epochs_recover)
                         
                         # Load best recovered weights back if saved
                         if os.path.exists(recovered_pt):
-                            checkpoint = torch.load(recovered_pt, map_location=self.device, weights_only=False)
-                            state_dict = checkpoint["model_state_dict"] if "model_state_dict" in checkpoint else checkpoint
-                            pruned_model.load_state_dict(state_dict, strict=False)
+                            pruned_model = ModelFactory.load(model_name, weights_path=recovered_pt, device=self.device, num_classes=num_classes)
+                            pruner_cls = PRUNER_REGISTRY[prune_type]
+                            pruner = pruner_cls(pruned_model, sparsity)
+                            pruned_model = pruner.prune()
                         else:
+                            from utils.pipeline_utils import get_clean_state_dict
+                            from utils.sparsity import state_dict_to_sparse
+                            sparse_sd = state_dict_to_sparse(get_clean_state_dict(pruned_model), threshold=0.1)
                             checkpoint = {
-                                "model_state_dict": pruned_model.state_dict(),
+                                "model_state_dict": sparse_sd,
                                 "epoch": self.epochs_recover,
                                 "loss": 0.0,
                                 "best_map": trainer_p.best_map,
-                                "config": {}
+                                "config": {"prune_type": prune_type, "sparsity": sparsity}
                             }
                             torch.save(checkpoint, recovered_pt)
                             
@@ -339,7 +358,10 @@ class ExperimentManager:
                         }, recovered_meta)
                     else:
                         logger.info(f"Recovered checkpoint already exists. Loading {recovered_pt}...")
-                        pruned_model.load_state_dict(extract_model_state_dict(torch.load(recovered_pt, map_location=self.device, weights_only=False)), strict=False)
+                        pruned_model = ModelFactory.load(model_name, weights_path=recovered_pt, device=self.device, num_classes=num_classes)
+                        pruner_cls = PRUNER_REGISTRY[prune_type]
+                        pruner = pruner_cls(pruned_model, sparsity)
+                        pruned_model = pruner.prune()
                         
                         # Verify sparsity
                         total_weights = 0
@@ -357,7 +379,7 @@ class ExperimentManager:
                             )
 
                     # Benchmark recovered model on Test set
-                    rec_results = benchmark.evaluate_checkpoint(pruned_model, val_loader)
+                    rec_results = benchmark.evaluate_checkpoint(pruned_model, val_loader, checkpoint_path=recovered_pt)
                     rec_results["Config"] = config_label
                     rec_results["Compression Ratio"] = baseline_results["Size (MB)"] / rec_results["Size (MB)"] if rec_results["Size (MB)"] > 0 else 1.0
                     rec_results["Throughput (img/s)"] = rec_results["FPS"]

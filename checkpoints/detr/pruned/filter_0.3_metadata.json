@@ -1,0 +1,29 @@
+{
+    "pruning_method": "filter",
+    "sparsity": 0.3,
+    "actual_sparsity": 0.2889612291151151,
+    "compression_ratio": 1.4063930701774587,
+    "base_params": 41524768,
+    "pruned_params": 29525720,
+    "removed_params": 11999048,
+    "base_flops": 114248908800,
+    "actual_flops": 72017246300,
+    "theoretical_flops": 81235403688,
+    "removed_flops_theoretical": 33013505112,
+    "size_reduction_mb": -0.13747692108154297,
+    "dense_size_mb": 112.92181396484375,
+    "sparse_file_size_mb": 113.0592908859253,
+    "actual_compression_ratio": 0.9987840280970782,
+    "config": {
+        "model": "detr",
+        "prune_type": "filter",
+        "sparsity": 0.3,
+        "dataset": "coco",
+        "seed": 42,
+        "pretrained": true,
+        "force": true
+    },
+    "timestamp": "2026-07-01T16:32:45.943650",
+    "torch_version": "2.12.1+cpu",
+    "checkpoint_format_info": "Sparse bit-packed checkpoint. Weights are baked (no pruning hooks). Use state_dict_to_dense() before loading or rely on extract_model_state_dict() which calls it automatically."
+}

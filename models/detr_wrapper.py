@@ -46,6 +46,13 @@ class DETRWrapper(BaseTrafficDetector):
     def _adapt_head(self, num_classes: int):
         """Replace DETR class projection head."""
         in_feat = self.model.class_embed.in_features
+        # If num_classes is 80 (COCO dataset) and the model already has 91 classes (which is 92 out_features),
+        # preserve the pretrained head and handle mapping in decode/forward.
+        if num_classes == 80 and self.model.class_embed.out_features == 92:
+            logger.info("Preserving pretrained 91-class DETR head for COCO (80 classes evaluation with mapping).")
+            self.model.num_classes = 91
+            return
+            
         # DETR class projection outputs class scores + 1 (background is the last index)
         if hasattr(self.model, "num_classes") and self.model.num_classes == num_classes + 1:
             logger.info(f"DETR head classes already matches {num_classes + 1}. Preserving pretrained weights.")
@@ -58,6 +65,20 @@ class DETRWrapper(BaseTrafficDetector):
         nn.init.kaiming_normal_(self.model.class_embed.weight, mode="fan_out", nonlinearity="relu")
         if self.model.class_embed.bias is not None:
             self.model.class_embed.bias.data.zero_()
+
+    def load_state_dict(self, state_dict: Dict[str, torch.Tensor], strict: bool = True):
+        """Override load_state_dict to dynamically adjust the classification head if there's a shape mismatch."""
+        key = "model.class_embed.weight"
+        if key in state_dict:
+            checkpoint_shape = state_dict[key].shape
+            current_shape = self.model.class_embed.weight.shape
+            if checkpoint_shape != current_shape:
+                logger.info(f"Dynamically adapting class_embed head shape to match checkpoint: {current_shape} -> {checkpoint_shape}")
+                in_features = self.model.class_embed.in_features
+                out_features = checkpoint_shape[0]
+                self.model.class_embed = nn.Linear(in_features, out_features)
+                self.model.num_classes = out_features
+        return super().load_state_dict(state_dict, strict=strict)
 
     def forward(self, x: torch.Tensor) -> Union[torch.Tensor, Dict[str, torch.Tensor]]:
         """Forward pass.
@@ -73,6 +94,25 @@ class DETRWrapper(BaseTrafficDetector):
             
             # Compute class probabilities (excluding the background class at index -1)
             cls_prob = F.softmax(out["pred_logits"], dim=-1)[:, :, :-1]
+            
+            if getattr(self.model, "num_classes", 0) == 91:
+                # Map 91 class probabilities to 80 classes
+                coco_cat_to_idx = {
+                    1: 0, 2: 1, 3: 2, 4: 3, 5: 4, 6: 5, 7: 6, 8: 7, 9: 8, 10: 9,
+                    11: 10, 13: 11, 14: 12, 15: 13, 16: 14, 17: 15, 18: 16, 19: 17, 20: 18,
+                    21: 19, 22: 20, 23: 21, 24: 22, 25: 23, 27: 24, 28: 25, 31: 26, 32: 27,
+                    33: 28, 34: 29, 35: 30, 36: 31, 37: 32, 38: 33, 39: 34, 40: 35, 41: 36,
+                    42: 37, 43: 38, 44: 39, 46: 40, 47: 41, 48: 42, 49: 43, 50: 44, 51: 45,
+                    52: 46, 53: 47, 54: 48, 55: 49, 56: 50, 57: 51, 58: 52, 59: 53, 60: 54,
+                    61: 55, 62: 56, 63: 57, 64: 58, 65: 59, 67: 60, 70: 61, 72: 62, 73: 63,
+                    74: 64, 75: 65, 76: 66, 77: 67, 78: 68, 79: 69, 80: 70, 81: 71, 82: 72,
+                    84: 73, 85: 74, 86: 75, 87: 76, 88: 77, 89: 78, 90: 79
+                }
+                indices = [0] * 80
+                for cat_id, idx in coco_cat_to_idx.items():
+                    indices[idx] = cat_id
+                indices_tensor = torch.tensor(indices, dtype=torch.long, device=cls_prob.device)
+                cls_prob = cls_prob.index_select(-1, indices_tensor)
             
             # Compute confidence score as maximum class probability
             conf = cls_prob.max(-1, keepdim=True).values
@@ -96,6 +136,27 @@ class DETRWrapper(BaseTrafficDetector):
         probs = out["pred_logits"].softmax(-1)[:, :, :-1]
         scores, class_ids = probs.max(-1)
 
+        # If using the 91-class pretrained head for COCO, map classes to 0-79
+        if getattr(self.model, "num_classes", 0) == 91:
+            coco_cat_to_idx = {
+                1: 0, 2: 1, 3: 2, 4: 3, 5: 4, 6: 5, 7: 6, 8: 7, 9: 8, 10: 9,
+                11: 10, 13: 11, 14: 12, 15: 13, 16: 14, 17: 15, 18: 16, 19: 17, 20: 18,
+                21: 19, 22: 20, 23: 21, 24: 22, 25: 23, 27: 24, 28: 25, 31: 26, 32: 27,
+                33: 28, 34: 29, 35: 30, 36: 31, 37: 32, 38: 33, 39: 34, 40: 35, 41: 36,
+                42: 37, 43: 38, 44: 39, 46: 40, 47: 41, 48: 42, 49: 43, 50: 44, 51: 45,
+                52: 46, 53: 47, 54: 48, 55: 49, 56: 50, 57: 51, 58: 52, 59: 53, 60: 54,
+                61: 55, 62: 56, 63: 57, 64: 58, 65: 59, 67: 60, 70: 61, 72: 62, 73: 63,
+                74: 64, 75: 65, 76: 66, 77: 67, 78: 68, 79: 69, 80: 70, 81: 71, 82: 72,
+                84: 73, 85: 74, 86: 75, 87: 76, 88: 77, 89: 78, 90: 79
+            }
+            mapping_arr = [-1] * 92
+            for cat_id, idx in coco_cat_to_idx.items():
+                mapping_arr[cat_id] = idx
+            mapping_tensor = torch.tensor(mapping_arr, dtype=torch.long, device=device)
+            mapped_class_ids = mapping_tensor[class_ids]
+        else:
+            mapped_class_ids = class_ids
+
         # Convert relative cxcywh coordinates to relative x1y1x2y2
         cx, cy, w, h = out["pred_boxes"].unbind(-1)
         x1 = (cx - w / 2).clamp(0, 1)
@@ -106,11 +167,14 @@ class DETRWrapper(BaseTrafficDetector):
 
         out_boxes, out_scores, out_ids = [], [], []
         for b in range(B):
-            keep = scores[b] >= 0.05
+            if getattr(self.model, "num_classes", 0) == 91:
+                keep = (scores[b] >= 0.05) & (mapped_class_ids[b] >= 0)
+            else:
+                keep = scores[b] >= 0.05
             if keep.any():
                 out_boxes.append(boxes[b, keep])
                 out_scores.append(scores[b, keep])
-                out_ids.append(class_ids[b, keep])
+                out_ids.append(mapped_class_ids[b, keep])
             else:
                 out_boxes.append(torch.zeros(0, 4, device=device))
                 out_scores.append(torch.zeros(0, device=device))

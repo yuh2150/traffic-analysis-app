@@ -19,7 +19,7 @@ class TrafficBenchmark(BaseBenchmark):
         super().__init__(model_name, device, img_size)
         self.validator = None
 
-    def evaluate_checkpoint(self, model: nn.Module, loader: DataLoader) -> Dict[str, Any]:
+    def evaluate_checkpoint(self, model: nn.Module, loader: DataLoader, checkpoint_path: Optional[str] = None) -> Dict[str, Any]:
         """Loads and completely evaluates a model, computing structural, speed, and accuracy metrics."""
         # Check if the model has dynamic pruning hooks and bake them to get accurate speed/size metrics
         has_masks = any(hasattr(module, 'weight_orig') for module in model.modules())
@@ -33,6 +33,18 @@ class TrafficBenchmark(BaseBenchmark):
         
         logger.info(f"Evaluating model structure...")
         structural_metrics = self.profile_model(model)
+        
+        # Lưu dense size (in-memory) riêng — không ghi đè
+        dense_size_mb = structural_metrics["size_mb"]
+        file_size_mb = dense_size_mb  # fallback nếu không có checkpoint path
+        
+        # Override model size with actual file size on disk if checkpoint_path is provided
+        if checkpoint_path and os.path.exists(checkpoint_path):
+            file_size_mb = os.path.getsize(checkpoint_path) / (1024 ** 2)
+            logger.info(f"Actual checkpoint file size: {file_size_mb:.2f} MB (dense in-memory: {dense_size_mb:.2f} MB)")
+            structural_metrics["size_mb"] = file_size_mb
+        
+        compression_ratio = dense_size_mb / file_size_mb if file_size_mb > 0 else 1.0
         
         logger.info(f"Evaluating inference speed on device: {self.device}...")
         speed_metrics = self.profile_speed(model)
@@ -55,8 +67,12 @@ class TrafficBenchmark(BaseBenchmark):
             "Params": structural_metrics["params"],
             "FLOPs": structural_metrics["flops"],
             "Size (MB)": structural_metrics["size_mb"],
+            "Dense Size (MB)": dense_size_mb,
+            "Compression Ratio": round(compression_ratio, 2),
             "Sparsity": structural_metrics["sparsity"],
             "Latency (ms)": speed_metrics["latency_ms"],
+            "Latency Std (ms)": speed_metrics.get("latency_std_ms", 0.0),
+            "Latency Median (ms)": speed_metrics.get("latency_median_ms", 0.0),
             "FPS": speed_metrics["fps"],
             "Precision": accuracy_metrics["precision"],
             "Recall": accuracy_metrics["recall"],

@@ -13,14 +13,25 @@ def extract_model_state_dict(state: Any) -> dict:
     """Extracts the model state dictionary from various checkpoint formats."""
     if not isinstance(state, dict):
         return state
-        
+
+    # Local import to prevent circular dependency
+    from utils.pipeline_utils import clean_state_dict_on_the_fly
+    from utils.sparsity import state_dict_to_dense
+    
     # Case 1: Our trainer's checkpoint
     if "model_state_dict" in state:
-        return state["model_state_dict"]
+        state_dict = state["model_state_dict"]
+    else:
+        state_dict = state
+        
+    # Convert sparse state dict back to dense if sparse representation is used
+    state_dict = state_dict_to_dense(state_dict)
+        
+    state_dict = clean_state_dict_on_the_fly(state_dict)
         
     # Case 2: Ultralytics/torch.hub checkpoint
-    if "model" in state:
-        model_obj = state["model"]
+    if "model" in state_dict:
+        model_obj = state_dict["model"]
         if hasattr(model_obj, "state_dict"):
             raw_sd = model_obj.state_dict()
         else:
@@ -31,33 +42,32 @@ def extract_model_state_dict(state: Any) -> dict:
             wrapped_sd = {}
             for k, v in raw_sd.items():
                 wrapped_sd[f"model.{k}"] = v
-            return wrapped_sd
+            state_dict = wrapped_sd
 
     # Case 3: Raw state dict
-    # Check if it needs wrapper prepending
-    is_weight_dict = any(isinstance(v, torch.Tensor) for v in state.values())
+    # Detect existing wrapper prefix and add if missing
+    is_weight_dict = any(isinstance(v, torch.Tensor) for v in state_dict.values())
     if is_weight_dict:
-        # Check if it already has wrapper prefix:
-        # YOLO wrapper keys start with 'model.model.'
-        # DETR wrapper keys start with 'model.class_embed.' etc.
-        has_yolo_wrapper = any(k.startswith("model.model.") for k in state.keys())
-        has_detr_wrapper = any(k.startswith("model.class_embed.") or k.startswith("model.query_embed.") for k in state.keys())
+        has_yolo_wrapper = any(k.startswith("model.model.") for k in state_dict.keys())
+        has_detr_wrapper = any(k.startswith("model.class_embed.") or k.startswith("model.query_embed.") for k in state_dict.keys())
         
-        # Handle triple-prefixed keys (model.model.model.X -> model.model.X)
-        has_triple_prefix = any(k.startswith("model.model.model.") for k in state.keys())
+        # Fix accidental triple prefix from older versions
+        has_triple_prefix = any(k.startswith("model.model.model.") for k in state_dict.keys())
         if has_triple_prefix:
             wrapped_sd = {}
-            for k, v in state.items():
+            for k, v in state_dict.items():
                 wrapped_sd[k.replace("model.model.model.", "model.model.", 1)] = v
-            return wrapped_sd
+            state_dict = wrapped_sd
         
         if not (has_yolo_wrapper or has_detr_wrapper):
             wrapped_sd = {}
-            for k, v in state.items():
+            for k, v in state_dict.items():
                 wrapped_sd[f"model.{k}"] = v
-            return wrapped_sd
+            state_dict = wrapped_sd
             
-    return state
+    # Clean again in case any mapping additions created mask keys
+    state_dict = clean_state_dict_on_the_fly(state_dict)
+    return state_dict
 
 
 class ModelFactory:
@@ -106,6 +116,24 @@ class ModelFactory:
                 logger.info(f"Loading checkpoint weights from: {weights_path}")
                 state = torch.load(weights_path, map_location=device, weights_only=False)
                 state_dict = extract_model_state_dict(state)
+                
+                # Check if there is an associated metadata file to detect structured filter pruning
+                metadata_path = weights_path[:-3] + "_metadata.json" if weights_path.endswith(".pt") else weights_path + "_metadata.json"
+                if os.path.exists(metadata_path):
+                    try:
+                        import json
+                        with open(metadata_path, "r") as f:
+                            meta = json.load(f)
+                        pruning_method = meta.get("pruning_method")
+                        sparsity = meta.get("sparsity", 0.0)
+                        if pruning_method == "filter" and sparsity > 0.0:
+                            logger.info(f"Detected structured filter pruning with sparsity {sparsity} in metadata. Pruning model structure before loading weights...")
+                            from pruning.filter import FilterPruner
+                            pruner = FilterPruner(model, sparsity)
+                            model = pruner.prune()
+                    except Exception as e:
+                        logger.warning(f"Could not pre-prune model based on metadata: {e}")
+                
                 missing, unexpected = model.load_state_dict(state_dict, strict=False)
                 if missing or unexpected:
                     logger.warning(f"Checkpoint loading: {len(missing)} missing keys, {len(unexpected)} unexpected keys")

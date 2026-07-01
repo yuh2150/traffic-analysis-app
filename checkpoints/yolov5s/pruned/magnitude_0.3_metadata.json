@@ -1,16 +1,19 @@
 {
     "pruning_method": "magnitude",
     "sparsity": 0.3,
-    "actual_sparsity": 0.29918018229565824,
-    "compression_ratio": 1.4269002884017683,
+    "actual_sparsity": 0.28970674555300346,
+    "compression_ratio": 1.4078692057670694,
     "base_params": 7235389,
-    "pruned_params": 5070704,
-    "removed_params": 2164685,
+    "pruned_params": 5139248,
+    "removed_params": 2096141,
     "base_flops": 16625254400,
     "actual_flops": 16625254400,
-    "theoretical_flops": 11651307757,
-    "removed_flops_theoretical": 4973946643,
-    "size_reduction_mb": 8.257617950439453,
+    "theoretical_flops": 11808806053,
+    "removed_flops_theoretical": 4816448347,
+    "size_reduction_mb": 6.468792915344238,
+    "dense_size_mb": 27.673831939697266,
+    "sparse_file_size_mb": 21.205039024353027,
+    "actual_compression_ratio": 1.3050592318134913,
     "config": {
         "model": "yolov5s",
         "prune_type": "magnitude",
@@ -20,7 +23,7 @@
         "pretrained": false,
         "force": true
     },
-    "timestamp": "2026-06-24T19:53:06.583641",
-    "torch_version": "2.8.0+cu128",
-    "checkpoint_format_info": "Since magnitude pruning uses PyTorch's dynamic pruning hooks, the checkpoint contains weight_orig and weight_mask. To reload, register pruning buffers first."
+    "timestamp": "2026-07-01T14:40:06.305298",
+    "torch_version": "2.12.1+cpu",
+    "checkpoint_format_info": "Sparse bit-packed checkpoint. Weights are baked (no pruning hooks). Use state_dict_to_dense() before loading or rely on extract_model_state_dict() which calls it automatically."
 }

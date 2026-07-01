@@ -46,9 +46,10 @@ class BaseTrainer:
         self.scaler = torch.amp.GradScaler("cuda", enabled=use_amp and self.device.type == "cuda")
 
         # Check if the model contains pruning masks
-        self.is_pruned = any(hasattr(m, "pruning_mask") for m in model.modules())
-        if self.is_pruned:
-            logger.info("Pruning masks detected. BaseTrainer will enforce sparsity on parameters and gradients.")
+        self.is_pruned = any(hasattr(m, "pruning_mask") or hasattr(m, "weight_mask") for m in model.modules())
+        if self.is_pruned or (config and config.get("prune_type") == "magnitude"):
+            self.is_pruned = True
+            logger.info("Pruning / gradual pruning configuration detected. BaseTrainer will enforce sparsity.")
 
     def compute_loss(self, pred: torch.Tensor, targets: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:
         """Computes matching losses. Must be overridden by subclasses."""
@@ -107,6 +108,16 @@ class BaseTrainer:
 
         return total_loss / num_batches
 
+    def update_optimizer_for_pruning(self):
+        """Recreates the optimizer with the new parameter references after pruning hooks are updated."""
+        lr = self.optimizer.param_groups[0]['lr']
+        weight_decay = self.optimizer.param_groups[0].get('weight_decay', 1e-4)
+        params = [p for p in self.model.parameters() if p.requires_grad]
+        self.optimizer = torch.optim.AdamW(params, lr=lr, weight_decay=weight_decay)
+        if self.scheduler is not None:
+            T_max = getattr(self.scheduler, 'T_max', 10)
+            self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(self.optimizer, T_max=T_max)
+
     def train(self, epochs: int, start_epoch: int = 1) -> Dict[str, Any]:
         """Runs the complete training / fine-tuning iterations with epoch validation & early stopping."""
         os.makedirs(self.checkpoint_dir, exist_ok=True)
@@ -118,6 +129,24 @@ class BaseTrainer:
 
         for epoch in range(start_epoch, epochs + 1):
             logger.info(f"\n--- Starting Epoch {epoch}/{epochs} ---")
+            
+            # Apply gradual magnitude pruning if scheduled
+            if self.config and self.config.get("prune_type") == "magnitude":
+                target_sparsity = self.config.get("sparsity", 0.0)
+                if target_sparsity >= 0.5:
+                    if epoch == 1:
+                        current_sparsity = 0.3
+                    elif epoch == 2:
+                        current_sparsity = 0.5 if target_sparsity >= 0.5 else target_sparsity
+                    else:
+                        current_sparsity = target_sparsity
+                        
+                    logger.info(f"Gradual Pruning: Setting sparsity ratio to {current_sparsity*100:.1f}% for Epoch {epoch}")
+                    from pruning.magnitude import MagnitudePruner
+                    pruner = MagnitudePruner(self.model, current_sparsity)
+                    self.model = pruner.prune()
+                    self.update_optimizer_for_pruning()
+
             avg_loss = self.train_epoch(epoch)
             
             if self.scheduler is not None:

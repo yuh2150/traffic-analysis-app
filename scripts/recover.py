@@ -68,30 +68,41 @@ def main():
         logger.error(f"Pruned checkpoint not found at: {pruned_pt}. Please run scripts/prune.py first.")
         sys.exit(1)
 
-    # 1. Load model structure
-    logger.info("Initializing model structure and registering pruning masks...")
+    # 1. Load model structure and load weights
     num_classes = 80 if args.dataset == "coco" else 4
-    model = ModelFactory.load(args.model, num_classes=num_classes, device=device)
-    
-    # Register masks by applying same pruner to register buffers
-    pruner_cls = PRUNER_REGISTRY[args.prune_type]
-    pruner = pruner_cls(model, args.sparsity)
-    model = pruner.prune()
+    baseline_pt = artifact_manager.get_baseline_checkpoint(args.model, suffix='best')
+    is_gradual = (args.prune_type == "magnitude" and args.sparsity >= 0.5)
 
-    # Load weights
-    logger.info(f"Loading pruned weight state from: {pruned_pt}")
-    model.load_state_dict(extract_model_state_dict(torch.load(pruned_pt, map_location=device, weights_only=False)), strict=False)
+    if is_gradual:
+        logger.info(f"Gradual pruning enabled for target sparsity {args.sparsity}. Loading baseline weights from: {baseline_pt}")
+        model = ModelFactory.load(args.model, weights_path=baseline_pt, device=device, num_classes=num_classes)
+    else:
+        logger.info(f"Loading pruned weight state from: {pruned_pt}")
+        model = ModelFactory.load(args.model, weights_path=pruned_pt, device=device, num_classes=num_classes)
+        # Register masks on top of loaded weights
+        logger.info(f"Registering pruning masks for '{args.prune_type}' at sparsity {args.sparsity}...")
+        pruner_cls = PRUNER_REGISTRY[args.prune_type]
+        pruner = pruner_cls(model, args.sparsity)
+        model = pruner.prune()
 
     # Verify loaded model sparsity
-    total_weights = 0
-    zero_weights = 0
-    for name, module in model.named_modules():
-        if isinstance(module, (nn.Conv2d, nn.Linear)):
-            w = module.weight.data
-            total_weights += w.numel()
-            zero_weights += (w == 0.0).sum().item()
-    loaded_sparsity = zero_weights / total_weights if total_weights > 0 else 0.0
-    logger.info(f"Verified loaded model sparsity: {loaded_sparsity*100:.2f}% (Expected target: {args.sparsity*100:.2f}%)")
+    if args.prune_type == "filter":
+        # Structured pruning reduces parameter counts
+        base_model_temp = ModelFactory.load(args.model, weights_path="", device=device, num_classes=num_classes)
+        base_params = sum(p.numel() for p in base_model_temp.parameters())
+        curr_params = sum(p.numel() for p in model.parameters())
+        loaded_sparsity = 1.0 - (curr_params / base_params) if base_params > 0 else 0.0
+        del base_model_temp
+    else:
+        total_weights = 0
+        zero_weights = 0
+        for name, module in model.named_modules():
+            if isinstance(module, (nn.Conv2d, nn.Linear)):
+                w = module.weight.data
+                total_weights += w.numel()
+                zero_weights += (w == 0.0).sum().item()
+        loaded_sparsity = zero_weights / total_weights if total_weights > 0 else 0.0
+    logger.info(f"Verified loaded model sparsity: {loaded_sparsity*100:.2f}% (Expected target: {0.0 if is_gradual else args.sparsity*100:.2f}%)")
 
     # Determine paths based on dataset
     if args.dataset == "coco":
@@ -173,13 +184,14 @@ def main():
     
     if os.path.exists(best_pt):
         # Load best weights back to model for metadata calculations
-        checkpoint = torch.load(best_pt, map_location=device, weights_only=False)
-        state_dict = checkpoint["model_state_dict"] if "model_state_dict" in checkpoint else checkpoint
-        model.load_state_dict(state_dict, strict=False)
+        model = ModelFactory.load(args.model, weights_path=best_pt, device=device, num_classes=num_classes)
     else:
         # Save a proper dictionary checkpoint as fallback
+        from utils.pipeline_utils import get_clean_state_dict
+        from utils.sparsity import state_dict_to_sparse
+        sparse_sd = state_dict_to_sparse(get_clean_state_dict(model), threshold=0.1)
         checkpoint = {
-            "model_state_dict": model.state_dict(),
+            "model_state_dict": sparse_sd,
             "epoch": args.epochs,
             "loss": history[-1].get("loss", 0.0) if (isinstance(history, list) and len(history) > 0) else 0.0,
             "best_map": trainer.best_map,
@@ -193,14 +205,21 @@ def main():
         logger.info(f"Saved fallback recovered model dictionary to {best_pt}.")
 
     # Calculate actual sparsity after loading/finetuning
-    total_weights = 0
-    zero_weights = 0
-    for name, module in model.named_modules():
-        if isinstance(module, (nn.Conv2d, nn.Linear)):
-            w = module.weight.data
-            total_weights += w.numel()
-            zero_weights += (w == 0.0).sum().item()
-    actual_sparsity = zero_weights / total_weights if total_weights > 0 else 0.0
+    if args.prune_type == "filter":
+        base_model_temp = ModelFactory.load(args.model, weights_path="", device=device, num_classes=num_classes)
+        base_params = sum(p.numel() for p in base_model_temp.parameters())
+        curr_params = sum(p.numel() for p in model.parameters())
+        actual_sparsity = 1.0 - (curr_params / base_params) if base_params > 0 else 0.0
+        del base_model_temp
+    else:
+        total_weights = 0
+        zero_weights = 0
+        for name, module in model.named_modules():
+            if isinstance(module, (nn.Conv2d, nn.Linear)):
+                w = module.weight.data
+                total_weights += w.numel()
+                zero_weights += (w == 0.0).sum().item()
+        actual_sparsity = zero_weights / total_weights if total_weights > 0 else 0.0
 
     # Save recovery metadata
     best_map_val = trainer.best_map

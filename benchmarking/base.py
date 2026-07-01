@@ -76,8 +76,10 @@ class BaseBenchmark:
 
     def profile_speed(self, model: nn.Module, num_runs: int = 50) -> Dict[str, float]:
         """Profiles the execution latency (ms) and throughput (FPS) on the device."""
-        latency_ms, fps = benchmark_latency_fps(model, self.device, num_runs=num_runs, img_size=self.img_size)
+        res = benchmark_latency_fps(model, self.device, num_runs=num_runs, img_size=self.img_size)
         return {
-            "latency_ms": latency_ms,
-            "fps": fps,
+            "latency_ms": res[0],
+            "fps": res[1],
+            "latency_std_ms": res[2],
+            "latency_median_ms": res[3],
         }

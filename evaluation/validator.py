@@ -187,7 +187,8 @@ class Validator:
 
     def measure_speed(self, img_size: Tuple[int, ...], num_runs: int = 50) -> Tuple[float, float]:
         """Measures execution latency (ms) and FPS throughput."""
-        return benchmark_latency_fps(self.model, self.device, num_runs=num_runs, img_size=img_size)
+        res = benchmark_latency_fps(self.model, self.device, num_runs=num_runs, img_size=img_size)
+        return res[0], res[1]
 
     def run_evaluation(self, dataloader: DataLoader) -> Dict[str, Any]:
         """Runs the validation pipeline and returns all performance & accuracy metrics."""

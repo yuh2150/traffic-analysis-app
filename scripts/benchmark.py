@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import os
 import sys
+import json
 import argparse
 import logging
 import torch
@@ -145,7 +146,7 @@ def main():
     # Run benchmark evaluation
     logger.info("Starting benchmark evaluation...")
     benchmark = TrafficBenchmark(args.model, device, (3,) + img_size)
-    results = benchmark.evaluate_checkpoint(model, val_loader)
+    results = benchmark.evaluate_checkpoint(model, val_loader, checkpoint_path=args.checkpoint)
 
     # Update/Add custom metadata to results
     results["Config"] = f"Pruned {prune_type_str} ({int(sparsity_val*100)}%)" if sparsity_val > 0 else "Baseline FP32"
@@ -162,20 +163,60 @@ def main():
         "unexpected_keys_count": len(unexpected_keys)
     }
 
+    # Read metadata from parallel JSON file to enrich storage info
+    try:
+        meta_path = artifact_manager.get_metadata_path(args.checkpoint)
+        if os.path.exists(meta_path):
+            with open(meta_path, "r") as f:
+                meta = json.load(f)
+            if "dense_size_mb" in meta:
+                results["Dense Size (MB)"] = meta["dense_size_mb"]
+            if "sparse_file_size_mb" in meta:
+                results["Sparse File Size (MB)"] = meta["sparse_file_size_mb"]
+            if "actual_compression_ratio" in meta:
+                results["Actual Compression Ratio"] = meta["actual_compression_ratio"]
+            if "sparse_threshold" in meta:
+                results["Sparse Threshold"] = meta["sparse_threshold"]
+    except Exception as e:
+        logger.warning(f"Could not read metadata for compression info: {e}")
+
     # Print results summary
-    print("\n" + "=" * 50)
+    print("\n" + "=" * 60)
     print("BENCHMARK RESULTS SUMMARY:")
-    print("=" * 50)
-    for k, v in results.items():
-        if isinstance(v, float):
-            print(f"{k:<25}: {v:.4f}")
-        elif isinstance(v, dict):
-            print(f"{k:<25}:")
-            for subk, subv in v.items():
-                print(f"  {subk:<23}: {subv}")
+    print("=" * 60)
+
+    storage_keys = ["Dense Size (MB)", "Size (MB)", "Sparse File Size (MB)",
+                    "Compression Ratio", "Actual Compression Ratio", "Sparsity", "Actual Sparsity"]
+
+    # Group: performance & accuracy first, storage after
+    perf_keys = [k for k in results.keys() if k not in storage_keys and k != "State Dict Match Info"]
+    for k in perf_keys:
+        if isinstance(results[k], float):
+            print(f"  {k:<25}: {results[k]:.4f}")
         else:
-            print(f"{k:<25}: {v}")
-    print("=" * 50 + "\n")
+            print(f"  {k:<25}: {results[k]}")
+
+    # Storage section
+    print(f"\n  {'─'*55}")
+    print(f"  STORAGE / COMPRESSION")
+    print(f"  {'─'*55}")
+    for k in storage_keys:
+        if k in results and results[k] is not None:
+            v = results[k]
+            if isinstance(v, float):
+                print(f"  {k:<25}: {v:.4f}")
+            else:
+                print(f"  {k:<25}: {v}")
+
+    # State dict match info
+    if "State Dict Match Info" in results:
+        print(f"  {'─'*55}")
+        print(f"  STATE DICT MATCH")
+        print(f"  {'─'*55}")
+        for subk, subv in results["State Dict Match Info"].items():
+            print(f"  {subk:<25}: {subv}")
+
+    print("=" * 60 + "\n")
 
     # Save results using ArtifactManager
     if not args.no_save:

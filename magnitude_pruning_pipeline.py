@@ -151,118 +151,111 @@ class YOLOv5Model(BaseModel):
         super().__init__()
         from ultralytics import YOLO
         _hub = YOLO('yolov5s.pt')
-        self.raw_model = _hub.model.model
+        self.raw_model = _hub.model
         self.conf = 0.001
         self.iou = 0.65
-        self.num_classes = self._infer_classes()
+        self.num_classes = 80
 
-    def _infer_classes(self):
-        detect = self._get_detect()
-        return detect.no - 5 if (detect is not None and hasattr(detect, 'no')) else 80
-
-    def _get_detect(self):
-        m = self.raw_model
-        for i in range(len(m) - 1, -1, -1):
-            if hasattr(m[i], 'no'):
-                return m[i]
-        return None
-
-    def _run_backbone_neck(self, x):
-        m = self.raw_model
-        detect_idx = -1
-        for i in range(len(m) - 1, -1, -1):
-            if hasattr(m[i], 'no'):
-                detect_idx = i
-                break
-        layer_outputs = []
-        y = x
-        for i, layer in enumerate(m):
-            if i == detect_idx:
-                break
-            if hasattr(layer, 'f') and layer.f != -1:
-                f = layer.f
-                if isinstance(f, int):
-                    inp = layer_outputs[f] if f >= 0 else y
-                else:
-                    inp = [layer_outputs[j] if j >= 0 else y for j in f]
-            else:
-                inp = y
-            y = layer(inp)
-            layer_outputs.append(y)
-        return [layer_outputs[j] for j in m[detect_idx].f if j >= 0]
-
-    def _decode(self, x):
-        detect = self._get_detect()
-        if detect is None: return x
-        z = []
-        for i, xi in enumerate(x):
-            bs, _, ny, nx = xi.shape
-            xi = xi.view(bs, detect.no, ny, nx).permute(0, 2, 3, 1).contiguous()
-            if detect.grid[i].shape[2:4] != (ny, nx):
-                detect.grid[i], detect.anchor_grid[i] = detect._make_grid(nx, ny, i)
-            y = xi.sigmoid()
-            nch = 5 + self.num_classes
-            y[..., 0:2] = (y[..., 0:2] * 2.0 - 0.5 + detect.grid[i].to(xi.device)) * detect.stride[i].to(xi.device)
-            y[..., 2:4] = (y[..., 2:4] * 2.0) ** 2 * detect.anchor_grid[i].to(xi.device)
-            z.append(y.view(bs, -1, nch))
-        return torch.cat(z, 1)
-
-    def _decode_to_xyxy(self, x, img_w, img_h):
-        if isinstance(x, (list, tuple)) and len(x) == 2 and isinstance(x[0], torch.Tensor) and x[0].dim() == 3:
-            pred = x[0]
-        elif isinstance(x, torch.Tensor) and x.dim() == 3:
-            pred = x
-        else:
-            pred = self._decode(x)
-        box_cxcy = pred[..., 0:2]; box_wh = pred[..., 2:4]
-        x1y1 = box_cxcy - box_wh / 2.0; x2y2 = box_cxcy + box_wh / 2.0
-        boxes_xyxy = torch.cat([x1y1, x2y2], dim=-1)
-        obj_conf = pred[..., 4:5]; cls_conf = pred[..., 5:]
-        scores, labels = cls_conf.max(dim=-1, keepdim=True)
-        scores = scores * obj_conf
-        out = torch.cat([boxes_xyxy, scores, labels.float()], dim=-1)
-        out[..., 0] /= img_w; out[..., 1] /= img_h
-        out[..., 2] /= img_w; out[..., 3] /= img_h
-        return out
-
-    def _nms(self, pred, conf_thres=0.001, iou_thres=0.65):
-        from torchvision.ops import nms
-        out = []
-        for i in range(pred.shape[0]):
-            det = pred[i]
-            mask = det[:, 4] > conf_thres
-            det = det[mask]
-            if det.shape[0] == 0:
-                out.append(torch.zeros((0, 6), device=pred.device))
-                continue
-            keep = nms(det[:, :4], det[:, 4], iou_thres)
-            out.append(det[keep])
-        return out
+    def train(self, mode: bool = True):
+        self.training = mode
+        self.raw_model.train(mode)
+        return self
 
     def forward(self, images):
-        B, _, H, W = images.shape
-        x = images * 255.0
-        if W != self.YOLO_IMG_SIZE or H != self.YOLO_IMG_SIZE:
-            x = F.interpolate(x, size=(self.YOLO_IMG_SIZE, self.YOLO_IMG_SIZE),
-                              mode='bilinear', align_corners=False)
-        fpn_maps = self._run_backbone_neck(x)
-        detect = self._get_detect()
-        raw_out = detect(fpn_maps)
-        pred = self._decode_to_xyxy(raw_out, self.YOLO_IMG_SIZE, self.YOLO_IMG_SIZE)
-        return self._nms(pred, self.conf, self.iou)
+        """Hàm forward phục vụ cho Inference / Evaluation"""
+        self.raw_model.eval()
+        with torch.no_grad():
+            B, _, H, W = images.shape
+            x = images * 255.0
+            if W != self.YOLO_IMG_SIZE or H != self.YOLO_IMG_SIZE:
+                x = F.interpolate(x, size=(self.YOLO_IMG_SIZE, self.YOLO_IMG_SIZE),
+                                  mode='bilinear', align_corners=False)
+            
+            raw_out = self.raw_model(x)
+            
+            if isinstance(raw_out, dict):
+                raw_out = raw_out.get('output', raw_out.get('pred', list(raw_out.values())[0]))
+            elif isinstance(raw_out, (list, tuple)):
+                raw_out = raw_out[0]
+
+            if raw_out.dim() == 3 and raw_out.shape[1] < raw_out.shape[2]:
+                raw_out = raw_out.transpose(1, 2)
+
+            return self._custom_torchvision_nms(raw_out)
 
     def forward_train(self, images):
-        B, _, H, W = images.shape
-        x = images * 255.0
-        if W != self.YOLO_IMG_SIZE or H != self.YOLO_IMG_SIZE:
-            x = F.interpolate(x, size=(self.YOLO_IMG_SIZE, self.YOLO_IMG_SIZE),
-                              mode='bilinear', align_corners=False)
-        fpn_maps = self._run_backbone_neck(x)
-        detect = self._get_detect()
-        raw_out = detect(fpn_maps)
-        if isinstance(raw_out, tuple) and len(raw_out) == 2:
-            raw_out = raw_out[1]
-        return self._decode(raw_out)
+        """Hàm forward phục vụ cho việc tính Loss Gradient khi Training"""
+        with torch.enable_grad():
+            B, _, H, W = images.shape
+            x = images * 255.0
+            if W != self.YOLO_IMG_SIZE or H != self.YOLO_IMG_SIZE:
+                x = F.interpolate(x, size=(self.YOLO_IMG_SIZE, self.YOLO_IMG_SIZE),
+                                  mode='bilinear', align_corners=False)
+            
+            if not x.requires_grad:
+                x.requires_grad_(True)
+            
+            self.raw_model.train()
+            raw_out = self.raw_model(x)
+            
+            if isinstance(raw_out, dict):
+                raw_out = raw_out.get('output', raw_out.get('pred', list(raw_out.values())[0]))
+            elif isinstance(raw_out, (list, tuple)):
+                raw_out = raw_out[0]
+            
+            if isinstance(raw_out, torch.Tensor):
+                if raw_out.requires_grad is False:
+                    raw_out.requires_grad_(True)
+                
+                if raw_out.dim() == 3 and raw_out.shape[1] < raw_out.shape[2]:
+                    raw_out = raw_out.transpose(1, 2)
+                    
+                return raw_out
+            else:
+                raise TypeError(f"Expected torch.Tensor, got {type(raw_out)}")
+
+    def _custom_torchvision_nms(self, raw_out):
+        from torchvision.ops import nms
+        B = raw_out.shape[0]
+        results = []
+        
+        for b in range(B):
+            pred = raw_out[b]
+            bboxes = pred[:, :4]
+            obj_conf = pred[:, 4]
+            class_probs = pred[:, 5:5 + self.num_classes]
+            max_probs, class_ids = class_probs.max(dim=-1)
+            scores = max_probs * obj_conf
+            
+            conf_mask = scores > self.conf
+            if not conf_mask.any():
+                results.append(torch.zeros((0, 6), device=raw_out.device))
+                continue
+                
+            f_boxes = bboxes[conf_mask]
+            f_scores = scores[conf_mask]
+            f_class_ids = class_ids[conf_mask]
+            
+            cx, cy, w, h = f_boxes.unbind(-1)
+            x1 = cx - w / 2
+            y1 = cy - h / 2
+            x2 = cx + w / 2
+            y2 = cy + h / 2
+            xyxy_boxes = torch.stack([x1, y1, x2, y2], dim=-1)
+            
+            keep = nms(xyxy_boxes, f_scores, self.iou)
+            
+            if len(keep) == 0:
+                results.append(torch.zeros((0, 6), device=raw_out.device))
+            else:
+                final_boxes = xyxy_boxes[keep] / self.YOLO_IMG_SIZE
+                final_scores = f_scores[keep].unsqueeze(-1)
+                final_classes = f_class_ids[keep].unsqueeze(-1).float()
+                
+                image_res = torch.cat([final_boxes, final_scores, final_classes], dim=-1)
+                results.append(image_res)
+                
+        return results
 
     def get_raw_model(self): return self.raw_model
     def get_input_size(self): return (3, self.YOLO_IMG_SIZE, self.YOLO_IMG_SIZE)
@@ -651,7 +644,7 @@ def evaluate_coco(model, dataloader, coco_gt, device, desc='eval'):
                     if is_yolo:
                         category_id = idx_to_coco_cat.get(int(cls_id), int(cls_id) + 1)
                     else:
-                        category_id = int(cls_id) + 1
+                        category_id = int(cls_id)
                     
                     results.append({
                         'image_id': int(img_id),

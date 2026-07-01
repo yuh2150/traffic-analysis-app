@@ -80,12 +80,14 @@ class ArtifactManager:
         config: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Saves a model checkpoint including optimizer, scheduler, epoch, best_map, and config info."""
-        # Strip thop profile keys if present in weights
-        state_dict = model.state_dict()
-        clean_state_dict = {k: v for k, v in state_dict.items() if not k.endswith("total_ops") and not k.endswith("total_params")}
+        # Strip thop profile keys and bake pruning weight masks before saving
+        from utils.pipeline_utils import get_clean_state_dict
+        from utils.sparsity import state_dict_to_sparse
+        clean_state_dict = get_clean_state_dict(model)
+        sparse_state_dict = state_dict_to_sparse(clean_state_dict, threshold=0.1)
         
         state = {
-            "model_state_dict": clean_state_dict,
+            "model_state_dict": sparse_state_dict,
             "epoch": epoch,
             "loss": loss,
             "best_map": best_map,

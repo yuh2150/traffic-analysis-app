@@ -1,16 +1,19 @@
 {
     "pruning_method": "magnitude",
     "sparsity": 0.5,
-    "actual_sparsity": 0.45632204428978884,
-    "compression_ratio": 1.839324161476607,
-    "base_params": 41521941,
-    "pruned_params": 22574564,
-    "removed_params": 18947377,
-    "base_flops": 114245529600,
-    "actual_flops": 114245529600,
-    "theoretical_flops": 62112775981,
-    "removed_flops_theoretical": 52132753619,
-    "size_reduction_mb": 72.27850723266602,
+    "actual_sparsity": 0.3363229868015156,
+    "compression_ratio": 1.5067570220349522,
+    "base_params": 41524768,
+    "pruned_params": 27559034,
+    "removed_params": 13965734,
+    "base_flops": 114248908800,
+    "actual_flops": 114248908800,
+    "theoretical_flops": 75824374553,
+    "removed_flops_theoretical": 38424534247,
+    "size_reduction_mb": 46.45378589630127,
+    "dense_size_mb": 158.8096923828125,
+    "sparse_file_size_mb": 112.35590648651123,
+    "actual_compression_ratio": 1.4134521036673602,
     "config": {
         "model": "detr",
         "prune_type": "magnitude",
@@ -20,7 +23,7 @@
         "pretrained": false,
         "force": true
     },
-    "timestamp": "2026-06-24T20:22:53.828601",
-    "torch_version": "2.8.0+cu128",
-    "checkpoint_format_info": "Since magnitude pruning uses PyTorch's dynamic pruning hooks, the checkpoint contains weight_orig and weight_mask. To reload, register pruning buffers first."
+    "timestamp": "2026-07-01T11:34:58.082240",
+    "torch_version": "2.12.1+cpu",
+    "checkpoint_format_info": "Sparse bit-packed checkpoint. Weights are baked (no pruning hooks). Use state_dict_to_dense() before loading or rely on extract_model_state_dict() which calls it automatically."
 }

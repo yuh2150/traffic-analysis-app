@@ -76,9 +76,9 @@ def main():
         theoretical_flops = int(base_flops * (1.0 - actual_sparsity))
         
     removed_flops_theoretical = base_flops - theoretical_flops
-    size_reduction_mb = (base_params - active_params) * 4 / (1024 ** 2)
+    theoretical_size_reduction_mb = (base_params - active_params) * 4 / (1024 ** 2)
 
-    # Logging statistics
+    # Logging statistics (size_reduction_mb được tính sau khi save sparse)
     logger.info("==================================================")
     logger.info(f"PRUNING STATISTICS REPORT: {args.model.upper()} ({args.prune_type.upper()})")
     logger.info("==================================================")
@@ -90,7 +90,7 @@ def main():
     logger.info(f"Actual FLOPs (dense HW):     {actual_flops:,}")
     logger.info(f"Theoretical FLOPs (sparse):  {theoretical_flops:,}")
     logger.info(f"Removed FLOPs (theoretical): {removed_flops_theoretical:,} ({removed_flops_theoretical/max(base_flops,1)*100:.2f}%)")
-    logger.info(f"Est. Model Size Reduction:  {size_reduction_mb:.2f} MB")
+    logger.info(f"Theoretical Size Reduction: {theoretical_size_reduction_mb:.2f} MB (zero weights * 4B)")
     logger.info("==================================================")
 
     # Verification forward pass
@@ -121,18 +121,29 @@ def main():
             logger.info("Non-interactive mode or interrupt. Pruning aborted.")
             sys.exit(0)
 
-    torch.save(pruned_model.state_dict(), pruned_pt)
-    logger.info(f"Saved pruned checkpoint to: {pruned_pt}")
+    from utils.pipeline_utils import get_clean_state_dict
+    from utils.sparsity import state_dict_to_sparse, state_dict_to_dense
 
-    if args.prune_type == "magnitude":
-        logger.info(
-            "INFO: Magnitude pruning uses PyTorch's dynamic pruning hooks (torch.nn.utils.prune). "
-            "The saved state_dict contains weight masks ('weight_mask') and original parameters ('weight_orig'). "
-            "To successfully reload this checkpoint, you must: "
-            "1) Initialize a fresh model, "
-            "2) Instantiate and call MagnitudePruner on the model to register pruning buffers, "
-            "3) Load the state_dict (as done in recover.py / experiment_manager.py)."
-        )
+    # Lấy state dict đã bake (không còn pruning hooks)
+    clean_sd = get_clean_state_dict(pruned_model)
+
+    # Tính kích thước dense ước lượng
+    dense_bytes = sum(v.numel() * v.element_size() for v in clean_sd.values() if isinstance(v, torch.Tensor))
+    dense_size_mb = dense_bytes / (1024 * 1024)
+
+    # Threshold động: layer nào có sparsity > 5% mới compress
+    sparse_threshold = 0.05
+    sparse_sd = state_dict_to_sparse(clean_sd, threshold=sparse_threshold)
+    torch.save(sparse_sd, pruned_pt)
+
+    # Đo kích thước file thực tế trên đĩa
+    file_size_mb = os.path.getsize(pruned_pt) / (1024 * 1024)
+    actual_compression_ratio = dense_size_mb / file_size_mb if file_size_mb > 0 else 1.0
+    logger.info(f"Saved pruned checkpoint to: {pruned_pt}")
+    logger.info(f"Storage: {dense_size_mb:.2f}MB (dense) → {file_size_mb:.2f}MB (sparse file) = {actual_compression_ratio:.2f}x compression")
+
+    # Update size_reduction_mb trong log sau
+    size_reduction_mb = dense_size_mb - file_size_mb
 
     # Save metadata
     artifact_manager.save_metadata({
@@ -148,12 +159,15 @@ def main():
         "theoretical_flops": theoretical_flops,
         "removed_flops_theoretical": removed_flops_theoretical,
         "size_reduction_mb": size_reduction_mb,
+        "dense_size_mb": dense_size_mb,
+        "sparse_file_size_mb": file_size_mb,
+        "actual_compression_ratio": actual_compression_ratio,
         "config": vars(args),
         "timestamp": datetime.datetime.now().isoformat(),
         "torch_version": torch.__version__,
         "checkpoint_format_info": (
-            "Since magnitude pruning uses PyTorch's dynamic pruning hooks, the checkpoint contains weight_orig and weight_mask. "
-            "To reload, register pruning buffers first." if args.prune_type == "magnitude" else "Standard parameters checkpoint."
+            "Sparse bit-packed checkpoint. Weights are baked (no pruning hooks). "
+            "Use state_dict_to_dense() before loading or rely on extract_model_state_dict() which calls it automatically."
         )
     }, pruned_meta)
 

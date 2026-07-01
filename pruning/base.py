@@ -146,15 +146,19 @@ class BasePruner:
 
 @torch.no_grad()
 def enforce_sparsity(model: nn.Module):
-    """Enforces sparsity on all modules with a registered pruning_mask."""
+    """Enforces sparsity on all modules with a registered pruning_mask or weight_mask."""
     for module in model.modules():
         if hasattr(module, "pruning_mask"):
             module.weight.data.mul_(module.pruning_mask)
+        elif hasattr(module, "weight_mask"):
+            module.weight.data.mul_(module.weight_mask)
 
 
 def zero_pruned_gradients(model: nn.Module):
-    """Zeros gradients on all modules with a registered pruning_mask."""
+    """Zeros gradients on all modules with a registered pruning_mask or weight_mask."""
     for module in model.modules():
         if hasattr(module, "pruning_mask") and module.weight.grad is not None:
             module.weight.grad.data.mul_(module.pruning_mask)
+        elif hasattr(module, "weight_mask") and module.weight.grad is not None:
+            module.weight.grad.data.mul_(module.weight_mask)
 
