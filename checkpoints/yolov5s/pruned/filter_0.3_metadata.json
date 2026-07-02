@@ -10,20 +10,20 @@
     "actual_flops": 8357508000,
     "theoretical_flops": 8222583367,
     "removed_flops_theoretical": 8402671033,
-    "size_reduction_mb": -0.09654426574707031,
+    "size_reduction_mb": -0.09916877746582031,
     "dense_size_mb": 13.701961517333984,
-    "sparse_file_size_mb": 13.798505783081055,
-    "actual_compression_ratio": 0.993003281133132,
+    "sparse_file_size_mb": 13.801130294799805,
+    "actual_compression_ratio": 0.9928144452412577,
     "config": {
         "model": "yolov5s",
         "prune_type": "filter",
         "sparsity": 0.3,
         "dataset": "coco",
         "seed": 42,
-        "pretrained": true,
+        "pretrained": false,
         "force": true
     },
-    "timestamp": "2026-07-01T16:29:09.509786",
-    "torch_version": "2.12.1+cpu",
+    "timestamp": "2026-07-01T20:28:52.132948",
+    "torch_version": "2.8.0+cu128",
     "checkpoint_format_info": "Sparse bit-packed checkpoint. Weights are baked (no pruning hooks). Use state_dict_to_dense() before loading or rely on extract_model_state_dict() which calls it automatically."
 }

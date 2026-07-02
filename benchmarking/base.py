@@ -17,6 +17,7 @@ class BaseBenchmark:
 
     def profile_model(self, model: nn.Module) -> Dict[str, Any]:
         """Calculates structural metrics of the model: parameters, FLOPs, size, and global weight sparsity."""
+        model = model.to(self.device)
         model.eval()
         
         # Calculate parameters count (total parameters)
@@ -76,6 +77,7 @@ class BaseBenchmark:
 
     def profile_speed(self, model: nn.Module, num_runs: int = 50) -> Dict[str, float]:
         """Profiles the execution latency (ms) and throughput (FPS) on the device."""
+        model = model.to(self.device)
         res = benchmark_latency_fps(model, self.device, num_runs=num_runs, img_size=self.img_size)
         return {
             "latency_ms": res[0],

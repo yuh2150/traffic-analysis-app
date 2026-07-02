@@ -70,6 +70,46 @@ def extract_model_state_dict(state: Any) -> dict:
     return state_dict
 
 
+def align_state_dict(state_dict: dict, model_keys: list) -> dict:
+    """Aligns state_dict keys with model_keys by stripping/mapping model wrapper prefixes."""
+    # List of possible model wrapper prefixes, ordered from longest to shortest
+    possible_prefixes = ["model.model.model.", "model.model.", "model."]
+    
+    # 1. Determine the actual prefix present in the model keys
+    model_prefix = ""
+    for pref in possible_prefixes:
+        if any(k.startswith(pref) for k in model_keys):
+            model_prefix = pref
+            break
+            
+    # 2. Determine the actual prefix present in the checkpoint keys
+    checkpoint_prefix = ""
+    for pref in possible_prefixes:
+        if any(k.startswith(pref) for k in state_dict.keys()):
+            checkpoint_prefix = pref
+            break
+            
+    # If the prefixes are the same, no alignment is needed
+    if model_prefix == checkpoint_prefix:
+        return state_dict
+        
+    logger.info(f"Aligning checkpoint keys: mapping prefix '{checkpoint_prefix}' to model prefix '{model_prefix}'")
+    
+    aligned_sd = {}
+    for k, v in state_dict.items():
+        # Strip checkpoint prefix
+        if checkpoint_prefix and k.startswith(checkpoint_prefix):
+            stripped_key = k[len(checkpoint_prefix):]
+        else:
+            stripped_key = k
+            
+        # Prepend model prefix
+        new_key = model_prefix + stripped_key
+        aligned_sd[new_key] = v
+        
+    return aligned_sd
+
+
 class ModelFactory:
     """Factory to instantiate and load supported machine learning architectures."""
 
@@ -134,6 +174,7 @@ class ModelFactory:
                     except Exception as e:
                         logger.warning(f"Could not pre-prune model based on metadata: {e}")
                 
+                state_dict = align_state_dict(state_dict, list(model.state_dict().keys()))
                 missing, unexpected = model.load_state_dict(state_dict, strict=False)
                 if missing or unexpected:
                     logger.warning(f"Checkpoint loading: {len(missing)} missing keys, {len(unexpected)} unexpected keys")

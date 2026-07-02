@@ -20,6 +20,7 @@ def benchmark_latency_fps(
     
     Ensures deterministic CPU measurements by fixing threads, disabling GC, and doing sufficient warm-up.
     """
+    model = model.to(device)
     model.eval()
     
     # 1. Thread settings for CPU determinism

@@ -163,8 +163,11 @@ class BaseTrainer:
                 from evaluation.validator import Validator
                 logger.info("Running Epoch Validation...")
                 validator = Validator(self.model, self.device)
-                preds, gts = validator.gather_predictions(self.val_loader)
-                val_metrics = validator.calculate_accuracy_metrics(preds, gts)
+                if getattr(self.config, "dataset", None) == "coco":
+                    val_metrics = validator.calculate_accuracy_metrics_from_dataloader(self.val_loader)
+                else:
+                    preds, gts = validator.gather_predictions(self.val_loader)
+                    val_metrics = validator.calculate_accuracy_metrics(preds, gts)
                 
                 val_map50 = val_metrics["mAP50"]
                 val_map50_95 = val_metrics["mAP50-95"]

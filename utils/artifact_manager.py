@@ -116,9 +116,14 @@ class ArtifactManager:
         logger.info(f"Loading checkpoint: {load_path}")
         checkpoint = torch.load(load_path, map_location=device, weights_only=False)
         
-        # Check if wrapped in trainer dict vs raw weights
+        # Extract and align state dict
+        from models.factory import extract_model_state_dict, align_state_dict
+        state_dict = extract_model_state_dict(checkpoint)
+        state_dict = align_state_dict(state_dict, list(model.state_dict().keys()))
+        
+        model.load_state_dict(state_dict, strict=False)
+        
         if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
-            model.load_state_dict(checkpoint["model_state_dict"], strict=False)
             if optimizer is not None and "optimizer_state_dict" in checkpoint:
                 optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
             if scheduler is not None and "scheduler_state_dict" in checkpoint:
@@ -131,8 +136,6 @@ class ArtifactManager:
                 "config": checkpoint.get("config", None)
             }
         else:
-            # Raw state dict loading
-            model.load_state_dict(checkpoint, strict=False)
             return {"epoch": 0, "loss": 0.0, "best_map": 0.0, "config": None}
 
     def save_metadata(self, metadata: Dict[str, Any], save_path: str) -> None:

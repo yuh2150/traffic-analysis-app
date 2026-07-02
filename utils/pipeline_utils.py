@@ -39,8 +39,9 @@ def load_checkpoint_weights(model: nn.Module, checkpoint_path: str, device: torc
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
     
     # Import locally to avoid circular import issues
-    from models.factory import extract_model_state_dict
+    from models.factory import extract_model_state_dict, align_state_dict
     state_dict = extract_model_state_dict(checkpoint)
+    state_dict = align_state_dict(state_dict, list(model.state_dict().keys()))
     
     missing_keys, unexpected_keys = model.load_state_dict(state_dict, strict=False)
     

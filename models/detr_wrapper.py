@@ -77,7 +77,7 @@ class DETRWrapper(BaseTrafficDetector):
                 in_features = self.model.class_embed.in_features
                 out_features = checkpoint_shape[0]
                 self.model.class_embed = nn.Linear(in_features, out_features)
-                self.model.num_classes = out_features
+                self.model.num_classes = out_features - 1
         return super().load_state_dict(state_dict, strict=strict)
 
     def forward(self, x: torch.Tensor) -> Union[torch.Tensor, Dict[str, torch.Tensor]]:

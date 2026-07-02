@@ -1,13 +1,22 @@
+import contextlib
+import os
 import time
 import numpy as np
 import torch
 import torch.nn as nn
 import logging
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Subset
 from typing import Dict, Any, List, Tuple
 
 from models import BaseTrafficDetector
 from pruning.benchmark_utils import benchmark_latency_fps
+
+try:
+    from pycocotools.coco import COCO
+    from pycocotools.cocoeval import COCOeval
+except ImportError:  # pragma: no cover - optional dependency in some environments
+    COCO = None
+    COCOeval = None
 
 logger = logging.getLogger("Validator")
 
@@ -38,6 +47,123 @@ class Validator:
         self.model = model
         self.device = device
         self.num_classes = num_classes if num_classes is not None else getattr(model, "num_classes", None)
+
+    @staticmethod
+    def _unwrap_dataset(dataset):
+        while isinstance(dataset, Subset):
+            dataset = dataset.dataset
+        return dataset
+
+    @staticmethod
+    def _extract_coco_precision_recall(coco_eval) -> Tuple[float, float]:
+        precision = 0.0
+        recall = 0.0
+
+        if coco_eval is None or not hasattr(coco_eval, "eval") or coco_eval.eval is None:
+            return precision, recall
+
+        precision_tensor = coco_eval.eval.get("precision")
+        recall_tensor = coco_eval.eval.get("recall")
+        iou_thresholds = getattr(coco_eval.params, "iouThrs", None)
+
+        if precision_tensor is not None and iou_thresholds is not None:
+            iou_index = int(np.argmin(np.abs(np.asarray(iou_thresholds) - 0.5)))
+            precision_slice = precision_tensor[iou_index, :, :, 0, -1]
+            precision_slice = precision_slice[precision_slice > -1]
+            if precision_slice.size > 0:
+                precision = float(np.mean(precision_slice))
+
+        if recall_tensor is not None and iou_thresholds is not None:
+            iou_index = int(np.argmin(np.abs(np.asarray(iou_thresholds) - 0.5)))
+            recall_slice = recall_tensor[iou_index, :, 0, -1]
+            recall_slice = recall_slice[recall_slice > -1]
+            if recall_slice.size > 0:
+                recall = float(np.mean(recall_slice))
+
+        return precision, recall
+
+    def calculate_accuracy_metrics_from_dataloader(self, dataloader: DataLoader) -> Dict[str, float]:
+        """Calculates evaluation metrics using COCOeval for COCO datasets and the legacy matcher for others."""
+        dataset = self._unwrap_dataset(dataloader.dataset)
+
+        use_coco_eval = (
+            COCO is not None
+            and COCOeval is not None
+            and hasattr(dataset, "anno_file")
+            and hasattr(dataset, "coco_cat_to_idx")
+            and hasattr(dataset, "images")
+        )
+
+        if not use_coco_eval:
+            preds, gts = self.gather_predictions(dataloader)
+            return self.calculate_accuracy_metrics(preds, gts)
+
+        logger.info("Using official COCOeval-style evaluation for COCO metrics.")
+
+        coco_gt = COCO(dataset.anno_file)
+        inverse_category_map = {idx: cat_id for cat_id, idx in dataset.coco_cat_to_idx.items()}
+        image_meta = {int(img["id"]): img for img in dataset.images}
+        results = []
+
+        self.model.eval()
+        with torch.no_grad():
+            for imgs, targets in dataloader:
+                batch_imgs = torch.stack(imgs).to(self.device)
+                outputs = self.model(batch_imgs)
+
+                for index, target in enumerate(targets):
+                    image_id = int(target["image_id"].item())
+                    meta = image_meta.get(image_id)
+                    if meta is None:
+                        continue
+
+                    width = float(meta["width"])
+                    height = float(meta["height"])
+                    boxes = outputs["boxes"][index].detach().cpu().numpy()
+                    scores = outputs["scores"][index].detach().cpu().numpy()
+                    labels = outputs["class_ids"][index].detach().cpu().numpy()
+
+                    keep = scores >= 0.05
+                    boxes = boxes[keep]
+                    scores = scores[keep]
+                    labels = labels[keep]
+
+                    for box, score, label in zip(boxes, scores, labels):
+                        x1, y1, x2, y2 = box.tolist()
+                        x1 *= width
+                        x2 *= width
+                        y1 *= height
+                        y2 *= height
+                        results.append(
+                            {
+                                "image_id": image_id,
+                                "category_id": int(inverse_category_map.get(int(label), int(label) + 1)),
+                                "bbox": [float(x1), float(y1), float(x2 - x1), float(y2 - y1)],
+                                "score": float(score),
+                            }
+                        )
+
+        if not results:
+            logger.warning("No detections were produced during COCO evaluation.")
+            return {"mAP50": 0.0, "mAP50-95": 0.0, "precision": 0.0, "recall": 0.0}
+
+        with open(os.devnull, "w") as devnull, contextlib.redirect_stdout(devnull):
+            coco_dt = coco_gt.loadRes(results)
+            coco_eval = COCOeval(coco_gt, coco_dt, "bbox")
+            coco_eval.evaluate()
+            coco_eval.accumulate()
+            coco_eval.summarize()
+
+        precision, recall = self._extract_coco_precision_recall(coco_eval)
+        stats = coco_eval.stats.tolist() if coco_eval.stats is not None else [0.0] * 6
+
+        return {
+            "mAP": float(stats[0]),
+            "mAP50": float(stats[1]),
+            "mAP50-95": float(stats[0]),
+            "precision": precision,
+            "recall": recall,
+        }
 
     def gather_predictions(self, dataloader: DataLoader) -> Tuple[List[Dict[str, np.ndarray]], List[Dict[str, np.ndarray]]]:
         """Runs model inference over the loader to collect predicted and ground truth annotations."""
@@ -194,8 +320,7 @@ class Validator:
         """Runs the validation pipeline and returns all performance & accuracy metrics."""
         # 1. Compute accuracy metrics
         logger.info("Computing accuracy metrics (mAP, Precision, Recall)...")
-        preds, gts = self.gather_predictions(dataloader)
-        metrics = self.calculate_accuracy_metrics(preds, gts)
+        metrics = self.calculate_accuracy_metrics_from_dataloader(dataloader)
         
         # 2. Get image size
         img_size_val = (3, self.model.img_size, self.model.img_size)

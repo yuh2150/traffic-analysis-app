@@ -92,10 +92,11 @@ def main():
         val_anno = args.val_anno_dir
 
     # Validation loader
+    coco_batch_size = 1 if args.dataset == "coco" else 4
     val_loader = DatasetFactory.get_dataloader(
         img_dir=val_img,
         anno_dir=val_anno,
-        batch_size=4,
+        batch_size=coco_batch_size,
         img_size=img_size,
         shuffle=False,
         max_samples=args.max_samples,
@@ -107,30 +108,27 @@ def main():
     num_classes = 80 if args.dataset == "coco" else 4
     model = ModelFactory.load(args.model, num_classes=num_classes, device=device)
 
-    # 2. Register pruning masks/structures if needed
-    should_prune = False
-    if prune_type_str.lower() != "none" and sparsity_val > 0.0:
-        if prune_type_str.lower() == "magnitude":
-            # Only prune model to add masks if checkpoint has weight masks
-            should_prune = has_masks
-        else:
-            # Structured/layer pruning always changes structure physically
-            should_prune = True
-
-    if should_prune:
-        logger.info(f"Registering pruning structure for type '{prune_type_str}' with sparsity {sparsity_val}...")
+    # 2. If structured pruning (filter or layer), prune structure before loading weights
+    is_structured = prune_type_str.lower() in ("filter", "layer") and sparsity_val > 0.0
+    if is_structured:
+        logger.info(f"Structured/layer pruning detected. Pruning model structure before loading weights...")
         prune_type_lower = prune_type_str.lower()
         if prune_type_lower in PRUNER_REGISTRY:
             pruner_cls = PRUNER_REGISTRY[prune_type_lower]
             pruner = pruner_cls(model, sparsity_val)
             model = pruner.prune()
         else:
-            logger.warning(f"Could not resolve pruner '{prune_type_str}' to register masks.")
-    else:
-        logger.info("No mask or structure pruning required before loading checkpoint weights (Full model or baked weights).")
+            logger.warning(f"Could not resolve pruner '{prune_type_str}' to prune structure.")
 
-    # 3. Load weights using pipeline_utils
+    # 3. Load weights
     missing_keys, unexpected_keys = load_checkpoint_weights(model, args.checkpoint, device, logger)
+
+    # 4. If unstructured (magnitude) pruning, register masks after loading weights
+    if prune_type_str.lower() == "magnitude" and sparsity_val > 0.0 and has_masks:
+        logger.info(f"Registering magnitude pruning masks for sparsity {sparsity_val}...")
+        pruner_cls = PRUNER_REGISTRY["magnitude"]
+        pruner = pruner_cls(model, sparsity_val)
+        model = pruner.prune()
 
     # Bake weights if dynamic hooks are present to improve benchmarking latency/FPS
     if has_masks:
@@ -146,7 +144,7 @@ def main():
     # Run benchmark evaluation
     logger.info("Starting benchmark evaluation...")
     benchmark = TrafficBenchmark(args.model, device, (3,) + img_size)
-    results = benchmark.evaluate_checkpoint(model, val_loader, checkpoint_path=args.checkpoint)
+    results = benchmark.evaluate_checkpoint(model, val_loader, checkpoint_path=args.checkpoint, dataset_type=args.dataset)
 
     # Update/Add custom metadata to results
     results["Config"] = f"Pruned {prune_type_str} ({int(sparsity_val*100)}%)" if sparsity_val > 0 else "Baseline FP32"
@@ -197,9 +195,9 @@ def main():
             print(f"  {k:<25}: {results[k]}")
 
     # Storage section
-    print(f"\n  {'─'*55}")
+    print(f"\n  {'-'*55}")
     print(f"  STORAGE / COMPRESSION")
-    print(f"  {'─'*55}")
+    print(f"  {'-'*55}")
     for k in storage_keys:
         if k in results and results[k] is not None:
             v = results[k]
@@ -210,9 +208,9 @@ def main():
 
     # State dict match info
     if "State Dict Match Info" in results:
-        print(f"  {'─'*55}")
+        print(f"  {'-'*55}")
         print(f"  STATE DICT MATCH")
-        print(f"  {'─'*55}")
+        print(f"  {'-'*55}")
         for subk, subv in results["State Dict Match Info"].items():
             print(f"  {subk:<25}: {subv}")
 

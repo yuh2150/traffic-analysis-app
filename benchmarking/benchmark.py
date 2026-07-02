@@ -19,7 +19,7 @@ class TrafficBenchmark(BaseBenchmark):
         super().__init__(model_name, device, img_size)
         self.validator = None
 
-    def evaluate_checkpoint(self, model: nn.Module, loader: DataLoader, checkpoint_path: Optional[str] = None) -> Dict[str, Any]:
+    def evaluate_checkpoint(self, model: nn.Module, loader: DataLoader, checkpoint_path: Optional[str] = None, dataset_type: Optional[str] = None) -> Dict[str, Any]:
         """Loads and completely evaluates a model, computing structural, speed, and accuracy metrics."""
         # Check if the model has dynamic pruning hooks and bake them to get accurate speed/size metrics
         has_masks = any(hasattr(module, 'weight_orig') for module in model.modules())
@@ -28,6 +28,8 @@ class TrafficBenchmark(BaseBenchmark):
             from utils.pipeline_utils import bake_pruned_weights
             num_baked = bake_pruned_weights(model)
             logger.info(f"Successfully baked weights and removed dynamic hooks for {num_baked} modules.")
+
+        model = model.to(self.device)
 
         self.validator = Validator(model, self.device)
         
@@ -51,8 +53,11 @@ class TrafficBenchmark(BaseBenchmark):
         
         logger.info(f"Evaluating accuracy metrics (mAP, Precision, Recall)...")
         try:
-            preds, gts = self.validator.gather_predictions(loader)
-            accuracy_metrics = self.validator.calculate_accuracy_metrics(preds, gts)
+            if dataset_type and dataset_type.lower() == "coco":
+                accuracy_metrics = self.validator.calculate_accuracy_metrics_from_dataloader(loader)
+            else:
+                preds, gts = self.validator.gather_predictions(loader)
+                accuracy_metrics = self.validator.calculate_accuracy_metrics(preds, gts)
         except Exception as e:
             logger.error(f"Failed to evaluate accuracy metrics: {e}", exc_info=True)
             accuracy_metrics = {
