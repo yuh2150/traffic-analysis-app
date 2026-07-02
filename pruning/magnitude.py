@@ -29,12 +29,33 @@ def get_detr_layer_sparsity(name: str, S: float) -> float:
     return min(0.65, S * 0.8)
 
 
-def get_yolov5_layer_sparsity(name: str, S: float) -> float:
+def _find_yolo_detect_prefix(model: nn.Module) -> str:
+    """Finds the module name prefix of YOLOv5's Detect head to protect it from pruning."""
+    raw = model.get_raw_model() if hasattr(model, "get_raw_model") else model
+    detect_mod = getattr(raw, 'model', None)
+    if detect_mod is not None and isinstance(detect_mod, nn.Sequential):
+        detect = detect_mod[-1]
+        for name, mod in model.named_modules():
+            if mod is detect:
+                return name + "."
+    return "model.model.24."
+
+
+def get_yolov5_layer_sparsity(name: str, S: float, detect_prefix: str = "model.model.24.") -> float:
     """Determines the custom sparsity ratio for YOLOv5 layers, protecting prediction heads."""
-    # Protect detection head (Detect module, layer 24)
-    if "model.24" in name or "model.model.24" in name:
+    if name.startswith(detect_prefix):
         return 0.0
     return S
+
+
+def _is_head_layer(name: str, module: nn.Module) -> bool:
+    """Checks if a module is a classification/regression head layer."""
+    name_lower = name.lower()
+    if any(kw in name_lower for kw in ("classifier", "class_embed", "bbox_embed", "fc", "head")):
+        return True
+    if isinstance(module, nn.Linear) and module.out_features <= 1000:
+        return True
+    return False
 
 
 @register_pruner("magnitude")
@@ -68,24 +89,25 @@ class MagnitudePruner(BasePruner):
 
         logger.info(f"Model signature detected: {'DETR' if is_detr else 'YOLOv5' if is_yolo else 'Generic'}")
 
+        if is_yolo:
+            detect_prefix = _find_yolo_detect_prefix(self.model)
+            logger.info(f"YOLO detect head prefix: '{detect_prefix}' (protected from pruning)")
+
         pruned_count = 0
         for name, module in layers:
             if is_detr:
                 ratio = get_detr_layer_sparsity(name, self.pruning_ratio)
             elif is_yolo:
-                ratio = get_yolov5_layer_sparsity(name, self.pruning_ratio)
+                ratio = get_yolov5_layer_sparsity(name, self.pruning_ratio, detect_prefix)
             else:
-                # Generic model: protect the last classification layer
-                if name == layers[-1][0]:
+                # Generic model: protect head layers
+                if _is_head_layer(name, module):
                     ratio = 0.0
                 else:
                     ratio = self.pruning_ratio
 
             if ratio > 0.0:
                 prune.l1_unstructured(module, name='weight', amount=ratio)
-                # Enforce the mask immediately in the weights tensor
-                if hasattr(module, 'weight_mask'):
-                    module.weight.data.mul_(module.weight_mask)
                 pruned_count += 1
                 logger.debug(f"Pruned layer '{name}' to sparsity: {ratio*100:.1f}%")
             else:

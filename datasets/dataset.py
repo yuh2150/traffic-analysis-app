@@ -7,6 +7,23 @@ import xml.etree.ElementTree as ET
 import logging
 import numpy as np
 
+
+def letterbox(im: np.ndarray, new_shape: Tuple[int, int] = (640, 640), color: Tuple[int, int, int] = (114, 114, 114)) -> np.ndarray:
+    shape = im.shape[:2]
+    r = min(new_shape[0] / shape[0], new_shape[1] / shape[1])
+    new_unpad = (int(round(shape[1] * r)), int(round(shape[0] * r)))
+    dw, dh = new_shape[1] - new_unpad[0], new_shape[0] - new_unpad[1]
+    dw /= 2
+    dh /= 2
+    if shape[::-1] != new_unpad:
+        im = cv2.resize(im, new_unpad, interpolation=cv2.INTER_LINEAR)
+    top = int(round(dh - 0.1))
+    bottom = int(round(dh + 0.1))
+    left = int(round(dw - 0.1))
+    right = int(round(dw + 0.1))
+    im = cv2.copyMakeBorder(im, top, bottom, left, right, cv2.BORDER_CONSTANT, value=color)
+    return im
+
 logger_traffic = logging.getLogger("TrafficDataset")
 
 CLASS_MAP = {
@@ -128,9 +145,6 @@ logger_coco = logging.getLogger("CocoDataset")
 
 class CocoDataset(Dataset):
     """Dataset class supporting MS COCO format with continuous 80-class mapping and synthetic fallback."""
-
-    COCO_MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
-    COCO_STD = np.array([0.229, 0.224, 0.225], dtype=np.float32)
 
     def __init__(self, img_dir: str, anno_file: str, img_size: Tuple[int, int] = (640, 640), max_samples: Optional[int] = None, normalized: bool = True):
         self.img_dir = img_dir
@@ -342,32 +356,14 @@ class CocoDataset(Dataset):
             np.random.seed(42 + idx)
             img_resized = np.random.randint(0, 256, (self.img_size[0], self.img_size[1], 3), dtype=np.uint8)
             img_tensor = torch.from_numpy(img_resized).permute(2, 0, 1).float() / 255.0
-            img_tensor = (img_tensor - torch.tensor(self.COCO_MEAN)[:, None, None]) / torch.tensor(self.COCO_STD)[:, None, None]
         else:
             img_path = os.path.join(self.img_dir, img_info["file_name"])
             img_bgr = cv2.imread(img_path)
             if img_bgr is None:
                 raise FileNotFoundError(f"COCO Image not found: {img_path}")
             img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
-            h, w = img_rgb.shape[:2]
-            target_short_side = int(self.img_size[0]) if isinstance(self.img_size, tuple) else int(self.img_size)
-            max_size = 1333
-            scale = target_short_side / min(h, w)
-            if h < w:
-                new_h = target_short_side
-                new_w = int(round(w * scale))
-            else:
-                new_w = target_short_side
-                new_h = int(round(h * scale))
-            if max(new_h, new_w) > max_size:
-                scale = max_size / max(new_h, new_w)
-                new_h = int(round(new_h * scale))
-                new_w = int(round(new_w * scale))
-            img_resized = cv2.resize(img_rgb, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+            img_resized = letterbox(img_rgb, self.img_size)
             img_tensor = torch.from_numpy(img_resized).permute(2, 0, 1).float() / 255.0
-            mean = torch.tensor(self.COCO_MEAN)[:, None, None]
-            std = torch.tensor(self.COCO_STD)[:, None, None]
-            img_tensor = (img_tensor - mean) / std
 
         anns = self.annotations.get(img_id, [])
         boxes, labels = [], []

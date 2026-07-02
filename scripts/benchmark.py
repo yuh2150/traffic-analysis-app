@@ -82,8 +82,14 @@ def main():
     logger.info(f"Detected/Resolved pruning config -> Type: {prune_type_str}, Sparsity: {sparsity_val}")
     logger.info(f"Dynamic masks detected in checkpoint: {has_masks}")
 
-    # Determine paths and image size
-    img_size = (640, 640) if args.model == "yolov5s" else (800, 800)
+    # Determine paths and image size from checkpoint config first, fallback to dataset defaults
+    ckpt_num_classes = config.get("num_classes", config.get("nc", None))
+    ckpt_img_size = config.get("img_size", None)
+    num_classes = ckpt_num_classes if ckpt_num_classes is not None else (80 if args.dataset == "coco" else 4)
+    img_size = ckpt_img_size if ckpt_img_size is not None else ((640, 640) if args.model == "yolov5s" else (800, 800))
+    if isinstance(img_size, int):
+        img_size = (img_size, img_size)
+
     if args.dataset == "coco":
         val_img = args.coco_val_img
         val_anno = args.coco_val_anno
@@ -104,34 +110,39 @@ def main():
     )
 
     # 1. Load model structure
-    logger.info(f"Initializing model structure for {args.model}...")
-    num_classes = 80 if args.dataset == "coco" else 4
-    model = ModelFactory.load(args.model, num_classes=num_classes, device=device)
+    logger.info(f"Initializing model structure for {args.model} with num_classes={num_classes}...")
+    ckpt_was_structured = prune_type_str.lower() in ("filter", "layer") and sparsity_val > 0.0
+    if ckpt_was_structured:
+        logger.info(f"Checkpoint was already structured-pruned. Using ModelFactory.load with weights_path for architecture alignment...")
+        model = ModelFactory.load(args.model, weights_path=args.checkpoint, device=device, num_classes=num_classes)
+        missing_keys, unexpected_keys = [], []
+    else:
+        model = ModelFactory.load(args.model, num_classes=num_classes, device=device)
 
-    # 2. If structured pruning (filter or layer), prune structure before loading weights
-    is_structured = prune_type_str.lower() in ("filter", "layer") and sparsity_val > 0.0
-    if is_structured:
-        logger.info(f"Structured/layer pruning detected. Pruning model structure before loading weights...")
-        prune_type_lower = prune_type_str.lower()
-        if prune_type_lower in PRUNER_REGISTRY:
-            pruner_cls = PRUNER_REGISTRY[prune_type_lower]
-            pruner = pruner_cls(model, sparsity_val)
-            model = pruner.prune()
-        else:
-            logger.warning(f"Could not resolve pruner '{prune_type_str}' to prune structure.")
+        # 2. If structured pruning (filter or layer), prune structure before loading weights
+        is_structured = prune_type_str.lower() in ("filter", "layer") and sparsity_val > 0.0
+        if is_structured:
+            logger.info(f"Structured/layer pruning detected. Pruning model structure before loading weights...")
+            prune_type_lower = prune_type_str.lower()
+            if prune_type_lower in PRUNER_REGISTRY:
+                pruner_cls = PRUNER_REGISTRY[prune_type_lower]
+                pruner = pruner_cls(model, sparsity_val)
+                model = pruner.prune()
+            else:
+                logger.warning(f"Could not resolve pruner '{prune_type_str}' to prune structure.")
 
-    # 3. Load weights
-    missing_keys, unexpected_keys = load_checkpoint_weights(model, args.checkpoint, device, logger)
+        # 3. Load weights
+        missing_keys, unexpected_keys = load_checkpoint_weights(model, args.checkpoint, device, logger)
 
     # 4. If unstructured (magnitude) pruning, register masks after loading weights
-    if prune_type_str.lower() == "magnitude" and sparsity_val > 0.0 and has_masks:
+    if prune_type_str.lower() == "magnitude" and sparsity_val > 0.0 and has_masks and not ckpt_was_structured:
         logger.info(f"Registering magnitude pruning masks for sparsity {sparsity_val}...")
         pruner_cls = PRUNER_REGISTRY["magnitude"]
         pruner = pruner_cls(model, sparsity_val)
         model = pruner.prune()
 
     # Bake weights if dynamic hooks are present to improve benchmarking latency/FPS
-    if has_masks:
+    if has_masks and not ckpt_was_structured:
         logger.info("Baking pruning masks into weights to eliminate forward hook overhead during benchmarking...")
         from utils.pipeline_utils import bake_pruned_weights
         num_baked = bake_pruned_weights(model)

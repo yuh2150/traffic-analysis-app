@@ -1,0 +1,27 @@
+{
+    "pruning_method": "filter",
+    "sparsity": 0.05,
+    "actual_sparsity": 0.09956202769471001,
+    "compression_ratio": 1.110570667560601,
+    "base_params": 7235389,
+    "pruned_params": 6515019,
+    "removed_params": 720370,
+    "base_flops": 16625254400,
+    "actual_flops": 14907831200,
+    "theoretical_flops": 14970010360,
+    "removed_flops_theoretical": 1655244040,
+    "size_reduction_mb": -0.4873380661010742,
+    "dense_size_mb": 24.921993255615234,
+    "sparse_file_size_mb": 25.40933132171631,
+    "actual_compression_ratio": 0.9808205080279083,
+    "config": {
+        "model": "yolov5s",
+        "prune_type": "filter",
+        "sparsity": 0.05,
+        "dataset": "coco",
+        "seed": 42,
+        "pretrained": true,
+        "force": true
+    },
+    "checkpoint_format_info": "Torch-Pruning state dict. Use tp.load_state_dict() or ModelFactory.load() to restore."
+}

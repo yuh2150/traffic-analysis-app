@@ -228,8 +228,8 @@ class YOLOv5Wrapper(BaseTrafficDetector):
             logger.warning("Detect module has no 'm' attribute; head adaptation skipped")
             return
         
-        # Preserving pretrained COCO weights if class count matches
-        if detect.nc == num_classes:
+        old_nc = detect.nc
+        if old_nc == num_classes:
             logger.info(f"Detect head classes already matches {num_classes}. Preserving pretrained head weights.")
             return
             
@@ -237,7 +237,7 @@ class YOLOv5Wrapper(BaseTrafficDetector):
         detect.no = 5 + num_classes
         for i in range(len(detect.m)):
             old_conv = detect.m[i]
-            na = old_conv.out_channels // (5 + 80)  # COCO na is typically 3
+            na = old_conv.out_channels // (5 + old_nc)
             new_conv = nn.Conv2d(
                 old_conv.in_channels,
                 na * (5 + num_classes),
@@ -246,11 +246,35 @@ class YOLOv5Wrapper(BaseTrafficDetector):
                 old_conv.padding,
                 bias=old_conv.bias is not None,
             )
-            # Copy existing weights for matching classes if possible, or initialize
-            nn.init.kaiming_normal_(new_conv.weight, mode="fan_out", nonlinearity="relu")
-            if new_conv.bias is not None:
-                new_conv.bias.data.zero_()
+            with torch.no_grad():
+                old_w = old_conv.weight
+                new_w = new_conv.weight
+                for a in range(na):
+                    old_start = a * (5 + old_nc)
+                    new_start = a * (5 + num_classes)
+                    new_w[new_start:new_start + 5] = old_w[old_start:old_start + 5]
+                    copy_nc = min(num_classes, old_nc)
+                    if copy_nc > 0:
+                        new_w[new_start + 5:new_start + 5 + copy_nc] = old_w[old_start + 5:old_start + 5 + copy_nc]
+                    if num_classes > old_nc:
+                        nn.init.kaiming_normal_(
+                            new_w[new_start + 5 + old_nc:new_start + 5 + num_classes],
+                            mode="fan_out", nonlinearity="relu"
+                        )
+                if new_conv.bias is not None:
+                    old_b = old_conv.bias
+                    new_b = new_conv.bias
+                    for a in range(na):
+                        old_start = a * (5 + old_nc)
+                        new_start = a * (5 + num_classes)
+                        new_b[new_start:new_start + 5] = old_b[old_start:old_start + 5]
+                        copy_nc = min(num_classes, old_nc)
+                        if copy_nc > 0:
+                            new_b[new_start + 5:new_start + 5 + copy_nc] = old_b[old_start + 5:old_start + 5 + copy_nc]
+                        if num_classes > old_nc:
+                            new_b[new_start + 5 + old_nc:new_start + 5 + num_classes] = 0.0
             detect.m[i] = new_conv
+        logger.info(f"Adapted detection head from {old_nc} to {num_classes} classes (preserved pretrained bbox + obj + {min(num_classes, old_nc)} class weights).")
 
     def decode_predictions(self, raw_outputs: list) -> torch.Tensor:
         """Decodes multi-scale raw outputs into absolute coordinate predictions.
